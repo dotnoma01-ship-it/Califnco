@@ -1,0 +1,6 @@
+{
+  "name": "Califnco Water Purifiers",
+  "description": "Production-grade e-commerce mobile application for Califnco water purifiers, supporting Customer, Dealer, and Admin workflows with Firebase Authentication and Material 3 design.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
