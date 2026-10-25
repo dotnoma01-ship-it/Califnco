@@ -43,10 +43,12 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
         elevation: 0,
         actions: [
           IconButton(
+            tooltip: 'Notifications',
             icon: const Icon(Icons.notifications_none_rounded),
-            onPressed: () {},
+            onPressed: () => context.push('/notifications'),
           ),
           IconButton(
+            tooltip: 'Dealer Account',
             icon: const Icon(Icons.account_circle_outlined),
             onPressed: () => context.push('/dealer/account'),
           ),
@@ -101,7 +103,7 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                     borderRadius: BorderRadius.circular(20),
                     boxShadow: [
                       BoxShadow(
-                        color: AppColors.primaryNavy.withOpacity(0.2),
+                        color: AppColors.primaryNavy.withValues(alpha: 0.2),
                         blurRadius: 12,
                         offset: const Offset(0, 4),
                       ),
@@ -116,7 +118,7 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.15),
+                              color: Colors.white.withValues(alpha: 0.15),
                               borderRadius: BorderRadius.circular(20),
                             ),
                             child: Text(
@@ -128,8 +130,8 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
                               color: isApproved
-                                  ? AppColors.success.withOpacity(0.2)
-                                  : (isPending ? AppColors.warning.withOpacity(0.2) : AppColors.error.withOpacity(0.2)),
+                                  ? AppColors.success.withValues(alpha: 0.2)
+                                  : (isPending ? AppColors.warning.withValues(alpha: 0.2) : AppColors.error.withValues(alpha: 0.2)),
                               borderRadius: BorderRadius.circular(20),
                               border: Border.all(
                                 color: isApproved
@@ -173,13 +175,13 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                       const SizedBox(height: 4),
                       Text(
                         'Authorized Contact: \${profile.contactPerson}',
-                        style: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.85)),
+                        style: TextStyle(fontSize: 13, color: Colors.white.withValues(alpha: 0.85)),
                       ),
                       const SizedBox(height: 14),
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.08),
+                          color: Colors.white.withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Row(
@@ -188,16 +190,16 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text('Available B2B Credit', style: TextStyle(fontSize: 10, color: Colors.white.withOpacity(0.7))),
+                                Text('Available B2B Credit', style: TextStyle(fontSize: 10, color: Colors.white.withValues(alpha: 0.7))),
                                 const SizedBox(height: 2),
                                 Text('₹\${profile.availableCredit.toInt()}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white)),
                               ],
                             ),
-                            Container(width: 1, height: 26, color: Colors.white.withOpacity(0.2)),
+                            Container(width: 1, height: 26, color: Colors.white.withValues(alpha: 0.2)),
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text('GSTIN Number', style: TextStyle(fontSize: 10, color: Colors.white.withOpacity(0.7))),
+                                Text('GSTIN Number', style: TextStyle(fontSize: 10, color: Colors.white.withValues(alpha: 0.7))),
                                 const SizedBox(height: 2),
                                 Text(profile.gstin, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white)),
                               ],
@@ -268,7 +270,7 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                     border: Border.all(color: AppColors.borderLight),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.04),
+                        color: Colors.black.withValues(alpha: 0.04),
                         blurRadius: 10,
                         offset: const Offset(0, 3),
                       ),
@@ -282,7 +284,7 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                           Container(
                             padding: const EdgeInsets.all(10),
                             decoration: BoxDecoration(
-                              color: AppColors.accentTeal.withOpacity(0.12),
+                              color: AppColors.accentTeal.withValues(alpha: 0.12),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: const Icon(Icons.inventory_2_outlined, color: AppColors.accentTeal, size: 24),
@@ -353,7 +355,7 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                               Container(
                                 padding: const EdgeInsets.all(8),
                                 decoration: BoxDecoration(
-                                  color: Colors.blue.withOpacity(0.1),
+                                  color: Colors.blue.withValues(alpha: 0.1),
                                   borderRadius: BorderRadius.circular(10),
                                 ),
                                 child: const Icon(Icons.filter_alt_outlined, color: Colors.blue, size: 20),
@@ -385,7 +387,7 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                               Container(
                                 padding: const EdgeInsets.all(8),
                                 decoration: BoxDecoration(
-                                  color: Colors.teal.withOpacity(0.1),
+                                  color: Colors.teal.withValues(alpha: 0.1),
                                   borderRadius: BorderRadius.circular(10),
                                 ),
                                 child: const Icon(Icons.water_drop_outlined, color: Colors.teal, size: 20),
@@ -462,7 +464,7 @@ class _DealerHomeScreenState extends State<DealerHomeScreen> {
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                               decoration: BoxDecoration(
-                                color: (isDispatched ? AppColors.accentTeal : AppColors.success).withOpacity(0.12),
+                                color: (isDispatched ? AppColors.accentTeal : AppColors.success).withValues(alpha: 0.12),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
@@ -732,7 +734,7 @@ class _WholesaleCatalogScreenState extends State<WholesaleCatalogScreen> {
                     color: AppColors.surfaceWhite,
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.08),
+                        color: Colors.black.withValues(alpha: 0.08),
                         blurRadius: 10,
                         offset: const Offset(0, -3),
                       ),
@@ -750,19 +752,13 @@ class _WholesaleCatalogScreenState extends State<WholesaleCatalogScreen> {
                       ),
                       const Spacer(),
                       ElevatedButton.icon(
-                        onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Wholesale Bulk Order created with \${cartTotalUnits} units totaling ₹\${cartTotalAmount.toInt()}!'),
-                              backgroundColor: AppColors.success,
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.check_circle_outline, size: 18),
+                        onPressed: () => context.push('/dealer/bulk-cart'),
+                        icon: const Icon(Icons.shopping_cart_checkout_rounded, size: 18),
                         label: const Text('Review Bulk Order'),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppColors.primaryNavy,
                           foregroundColor: Colors.white,
+                          minimumSize: const Size(0, 44),
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         ),
@@ -952,11 +948,11 @@ class FirestoreDealerCatalogRepository implements DealerCatalogRepository {
   }
 
   @override
-  Future<List<DealerPurchaseOrderModel>> getDealerRecentOrders(String dealerId) async {
+  Future<List<DealerPurchaseOrderModel>> getDealerRecentOrders(String dealerUid) async {
     final snapshot = await _firestore
-        .collection('dealer_purchase_orders')
-        .where('dealerId', isEqualTo: dealerId)
-        .orderBy('createdAt', descending: true)
+        .collection('dealer_orders')
+        .where('dealerId', isEqualTo: dealerUid)
+        .orderBy('orderDate', descending: true)
         .limit(10)
         .get();
 
@@ -965,10 +961,10 @@ class FirestoreDealerCatalogRepository implements DealerCatalogRepository {
       return DealerPurchaseOrderModel(
         id: doc.id,
         poNumber: data['poNumber'] ?? doc.id,
-        date: data['date'] ?? 'Recent',
+        date: data['orderDateFormatted'] ?? data['date'] ?? 'Recent',
         itemCount: data['itemCount'] ?? 1,
         totalWholesaleAmount: (data['totalAmount'] ?? 0).toDouble(),
-        status: data['status'] ?? 'processing',
+        status: data['fulfilmentStatus'] ?? data['status'] ?? 'processing',
       );
     }).toList();
   }
@@ -1006,7 +1002,7 @@ class DealerHomeCubit extends Cubit<DealerHomeState> {
       final profile = await repository.getDealerProfile(userId).catchError((_) {
         return DealerProfileModel.mockApprovedDealer();
       });
-      final orders = await repository.getDealerRecentOrders(profile.dealerId).catchError((_) {
+      final orders = await repository.getDealerRecentOrders(profile.uid).catchError((_) {
         return [
           DealerPurchaseOrderModel(
             id: 'po-1092',
@@ -1306,7 +1302,7 @@ class _WholesaleProductCardState extends State<WholesaleProductCard> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
-                            color: AppColors.success.withOpacity(0.12),
+                            color: AppColors.success.withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: Text(
@@ -1337,7 +1333,7 @@ class _WholesaleProductCardState extends State<WholesaleProductCard> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                  color: AppColors.accentTeal.withOpacity(0.12),
+                  color: AppColors.accentTeal.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
@@ -1364,7 +1360,7 @@ class _WholesaleProductCardState extends State<WholesaleProductCard> {
                     IconButton(
                       icon: const Icon(Icons.remove, size: 16),
                       onPressed: _quantity > moq ? () => setState(() => _quantity -= 1) : null,
-                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                      constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
                       padding: EdgeInsets.zero,
                     ),
                     Padding(
@@ -1376,8 +1372,10 @@ class _WholesaleProductCardState extends State<WholesaleProductCard> {
                     ),
                     IconButton(
                       icon: const Icon(Icons.add, size: 16),
-                      onPressed: () => setState(() => _quantity += 1),
-                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                      onPressed: _quantity < widget.product.stockQuantity
+                          ? () => setState(() => _quantity += 1)
+                          : null,
+                      constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
                       padding: EdgeInsets.zero,
                     ),
                   ],
@@ -1388,12 +1386,14 @@ class _WholesaleProductCardState extends State<WholesaleProductCard> {
               // Add to Bulk Order Button
               Expanded(
                 child: ElevatedButton(
-                  onPressed: () => widget.onAddBulk(_quantity),
+                  onPressed: widget.product.stockQuantity >= moq
+                      ? () => widget.onAddBulk(_quantity)
+                      : null,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.primaryNavy,
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    minimumSize: const Size(0, 38),
+                    minimumSize: const Size(0, 44),
                   ),
                   child: Text('Add to Bulk (₹\${(widget.product.dealerPrice * _quantity).toInt()})', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                 ),

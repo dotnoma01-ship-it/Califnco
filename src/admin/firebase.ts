@@ -66,7 +66,7 @@ export const isFirebaseConfigured = Boolean(
     resolvedConfig.projectId !== 'remixed-project-id'
 );
 
-const app = initializeApp(resolvedConfig);
+export const app = initializeApp(resolvedConfig);
 
 export const db =
   resolvedConfig.firestoreDatabaseId && resolvedConfig.firestoreDatabaseId !== '(default)'

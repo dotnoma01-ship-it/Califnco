@@ -78,7 +78,7 @@ class BulkOrderCartScreen extends StatelessWidget {
               // Dealer Verification Warning Banner (if not approved)
               if (!state.isDealerApproved)
                 Container(
-                  color: AppColors.error.withOpacity(0.12),
+                  color: AppColors.error.withValues(alpha: 0.12),
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                   child: const Row(
                     children: [
@@ -131,7 +131,7 @@ class BulkOrderCartScreen extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.03),
+            color: Colors.black.withValues(alpha: 0.03),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -294,7 +294,7 @@ class BulkOrderCartScreen extends StatelessWidget {
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.08),
+            color: Colors.black.withValues(alpha: 0.08),
             blurRadius: 16,
             offset: const Offset(0, -4),
           ),
@@ -368,7 +368,7 @@ class BulkOrderCartScreen extends StatelessWidget {
                     : null,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primaryNavy,
-                  disabledBackgroundColor: AppColors.textLight.withOpacity(0.3),
+                  disabledBackgroundColor: AppColors.textLight.withValues(alpha: 0.3),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   elevation: 2,
                 ),
@@ -415,7 +415,7 @@ class BulkOrderCartScreen extends StatelessWidget {
               width: 88,
               height: 88,
               decoration: BoxDecoration(
-                color: AppColors.accentTeal.withOpacity(0.1),
+                color: AppColors.accentTeal.withValues(alpha: 0.1),
                 shape: BoxShape.circle,
               ),
               child: const Icon(Icons.remove_shopping_cart_outlined, size: 40, color: AppColors.accentTeal),
@@ -433,12 +433,13 @@ class BulkOrderCartScreen extends StatelessWidget {
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: () => context.push('/dealer/catalog'),
+              onPressed: () => context.push('/dealer/wholesale-catalog'),
               icon: const Icon(Icons.storefront_rounded),
               label: const Text('Browse Wholesale Catalog'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.primaryNavy,
                 foregroundColor: Colors.white,
+                minimumSize: const Size(0, 44),
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
@@ -589,7 +590,7 @@ class _DealerOrderHistoryScreenState extends State<DealerOrderHistoryScreen> {
         border: Border.all(color: AppColors.cardBorder),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.03),
+            color: Colors.black.withValues(alpha: 0.03),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -683,25 +684,25 @@ class _DealerOrderHistoryScreenState extends State<DealerOrderHistoryScreen> {
 
     switch (status) {
       case DealerFulfilmentStatus.confirmed:
-        bg = Colors.blue.withOpacity(0.12);
+        bg = Colors.blue.withValues(alpha: 0.12);
         fg = Colors.blue.shade800;
         label = 'CONFIRMED';
         icon = Icons.verified_outlined;
         break;
       case DealerFulfilmentStatus.processing:
-        bg = Colors.orange.withOpacity(0.12);
+        bg = Colors.orange.withValues(alpha: 0.12);
         fg = Colors.orange.shade800;
         label = 'PROCESSING';
         icon = Icons.inventory_2_outlined;
         break;
       case DealerFulfilmentStatus.dispatched:
-        bg = AppColors.accentTeal.withOpacity(0.15);
+        bg = AppColors.accentTeal.withValues(alpha: 0.15);
         fg = const Color(0xFF007A99);
         label = 'DISPATCHED';
         icon = Icons.local_shipping_outlined;
         break;
       case DealerFulfilmentStatus.delivered:
-        bg = AppColors.success.withOpacity(0.12);
+        bg = AppColors.success.withValues(alpha: 0.12);
         fg = AppColors.success;
         label = 'DELIVERED';
         icon = Icons.check_circle_outline_rounded;
@@ -771,8 +772,11 @@ class _DealerOrderHistoryScreenState extends State<DealerOrderHistoryScreen> {
             ),
             const SizedBox(height: 16),
             ElevatedButton(
-              onPressed: () => context.push('/dealer/catalog'),
-              style: ElevatedButton.styleFrom(backgroundColor: AppColors.primaryNavy),
+              onPressed: () => context.push('/dealer/wholesale-catalog'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primaryNavy,
+                minimumSize: const Size(0, 44),
+              ),
               child: const Text('Start Wholesale Procurement', style: TextStyle(color: Colors.white)),
             ),
           ],
@@ -825,7 +829,7 @@ class DealerOrderDetailModal extends StatelessWidget {
                     width: 40,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: AppColors.textLight.withOpacity(0.5),
+                      color: AppColors.textLight.withValues(alpha: 0.5),
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
@@ -896,7 +900,7 @@ class DealerOrderDetailModal extends StatelessWidget {
                         height: 32,
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
-                          color: AppColors.primaryNavy.withOpacity(0.08),
+                          color: AppColors.primaryNavy.withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text('\${item.quantity}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.primaryNavy)),

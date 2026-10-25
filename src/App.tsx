@@ -261,7 +261,6 @@ export default function App() {
       {workspaceView === 'mobile' ? (
         <MobileAppStudio
           onOpenAdminConsole={() => {
-            setActivePage('service');
             setWorkspaceView('admin');
           }}
         />

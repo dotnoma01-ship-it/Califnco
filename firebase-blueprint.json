@@ -775,6 +775,315 @@
         "updatedByUid",
         "updatedAt"
       ]
+    },
+    "UserNotification": {
+      "title": "UserNotification",
+      "description": "Trusted backend and administrative order/service event notification delivered to a verified user inbox (Screen 25).",
+      "type": "object",
+      "properties": {
+        "recipientUid": {
+          "type": "string",
+          "description": "Firebase Authentication UID of the notification recipient.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short notification headline.",
+          "minLength": 3,
+          "maxLength": 140
+        },
+        "body": {
+          "type": "string",
+          "description": "Detailed notification message body.",
+          "minLength": 5,
+          "maxLength": 500
+        },
+        "eventType": {
+          "type": "string",
+          "description": "Trusted backend lifecycle event classification.",
+          "enum": [
+            "order_confirmed",
+            "order_processing",
+            "order_dispatched",
+            "order_delivered",
+            "order_cancelled",
+            "payment_settled",
+            "service_scheduled",
+            "system_notice"
+          ],
+          "maxLength": 32
+        },
+        "orderId": {
+          "type": "string",
+          "description": "Optional associated order document ID.",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "orderNumber": {
+          "type": "string",
+          "description": "Optional human-readable order or PO reference.",
+          "minLength": 0,
+          "maxLength": 40
+        },
+        "source": {
+          "type": "string",
+          "description": "Originating trusted backend event channel.",
+          "enum": [
+            "trusted_backend_order_event",
+            "trusted_admin_console_event",
+            "fcm_remote_sync"
+          ],
+          "maxLength": 40
+        },
+        "isRead": {
+          "type": "boolean",
+          "description": "Whether the recipient has marked the notification as read."
+        },
+        "createdAtIso": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 event creation timestamp.",
+          "minLength": 10,
+          "maxLength": 40
+        },
+        "readAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp recorded when recipient marks notification as read."
+        },
+        "createdByUid": {
+          "type": "string",
+          "description": "UID of the trusted administrator or backend dispatcher.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest read-state transition."
+        }
+      },
+      "required": [
+        "recipientUid",
+        "title",
+        "body",
+        "eventType",
+        "source",
+        "isRead",
+        "createdAtIso",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DevicePushToken": {
+      "title": "DevicePushToken",
+      "description": "Strictly owner-isolated Firebase Cloud Messaging registration token record per device (Screen 25).",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Authentication UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deviceId": {
+          "type": "string",
+          "description": "Deterministic alphanumeric device/installation hash identifier.",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fcmToken": {
+          "type": "string",
+          "description": "FCM device registration token issued after granted notification permission.",
+          "minLength": 20,
+          "maxLength": 4096
+        },
+        "platform": {
+          "type": "string",
+          "description": "Client runtime platform.",
+          "enum": ["android", "ios", "web"],
+          "maxLength": 16
+        },
+        "permissionStatus": {
+          "type": "string",
+          "description": "Verified OS notification authorization state.",
+          "enum": ["authorized", "provisional"],
+          "maxLength": 20
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server registration timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server token refresh timestamp."
+        }
+      },
+      "required": [
+        "userId",
+        "deviceId",
+        "fcmToken",
+        "platform",
+        "permissionStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserDeliveryAddress": {
+      "title": "UserDeliveryAddress",
+      "description": "Owner-isolated delivery address and optional OpenStreetMap pin coordinates with explicit unverified postal status (Screen 26).",
+      "type": "object",
+      "properties": {
+        "addressId": {
+          "type": "string",
+          "description": "Delivery address document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Authentication UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "label": {
+          "type": "string",
+          "description": "Address tag label.",
+          "enum": ["Home", "Work", "Other"],
+          "maxLength": 16
+        },
+        "recipientName": {
+          "type": "string",
+          "description": "Full name of delivery recipient.",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "description": "Recipient contact phone number.",
+          "minLength": 7,
+          "maxLength": 24
+        },
+        "streetAddress": {
+          "type": "string",
+          "description": "Manual flat/house number, building, and street address.",
+          "minLength": 5,
+          "maxLength": 240
+        },
+        "landmark": {
+          "type": "string",
+          "description": "Optional nearby landmark or floor details.",
+          "minLength": 0,
+          "maxLength": 140
+        },
+        "city": {
+          "type": "string",
+          "description": "Delivery city.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "state": {
+          "type": "string",
+          "description": "Delivery state or province.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "postalCode": {
+          "type": "string",
+          "description": "Postal or PIN code manually entered and confirmed by user.",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[0-9A-Za-z\\- ]+$"
+        },
+        "deliveryInstructions": {
+          "type": "string",
+          "description": "Optional courier or technician access instructions.",
+          "minLength": 0,
+          "maxLength": 240
+        },
+        "isDefault": {
+          "type": "boolean",
+          "description": "Whether this is the user's primary delivery address."
+        },
+        "hasCoordinates": {
+          "type": "boolean",
+          "description": "True when optional map/GPS coordinates were captured alongside manual postal fields."
+        },
+        "latitude": {
+          "type": "number",
+          "description": "Selected WGS84 latitude (-90 to 90), or 0 when manual_only."
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Selected WGS84 longitude (-180 to 180), or 0 when manual_only."
+        },
+        "locationSource": {
+          "type": "string",
+          "description": "How location coordinates (if any) were supplied.",
+          "enum": ["map_pin", "gps_pin", "manual_only"],
+          "maxLength": 24
+        },
+        "addressVerificationStatus": {
+          "type": "string",
+          "description": "Explicitly tracks whether postal address is unverified manual user input vs backend postal verification.",
+          "enum": ["unverified_manual_entry", "postal_verified_backend"],
+          "maxLength": 32
+        },
+        "createdAtIso": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 creation timestamp.",
+          "minLength": 10,
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "addressId",
+        "userId",
+        "label",
+        "recipientName",
+        "phone",
+        "streetAddress",
+        "landmark",
+        "city",
+        "state",
+        "postalCode",
+        "deliveryInstructions",
+        "isDefault",
+        "hasCoordinates",
+        "latitude",
+        "longitude",
+        "locationSource",
+        "addressVerificationStatus",
+        "createdAtIso",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -813,6 +1122,18 @@
     "/service_schedules/{scheduleId}": {
       "schema": "ServiceScheduleConfig",
       "description": "Configured technician time-slot availability queried by Mobile Screen 23."
+    },
+    "/notifications/{notificationId}": {
+      "schema": "UserNotification",
+      "description": "Trusted backend order and service event notifications read and marked-as-read on Mobile Screen 25."
+    },
+    "/users/{userId}/fcm_tokens/{deviceId}": {
+      "schema": "DevicePushToken",
+      "description": "Strictly owner-isolated FCM device registration tokens for Mobile Screen 25."
+    },
+    "/users/{userId}/delivery_addresses/{addressId}": {
+      "schema": "UserDeliveryAddress",
+      "description": "Strictly owner-isolated customer delivery addresses and unverified map pin coordinates for Mobile Screen 26."
     }
   }
 }

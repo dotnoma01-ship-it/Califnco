@@ -5,11 +5,14 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut, type User as FirebaseUser } from 'firebase/auth';
-import { auth, googleProvider, isFirebaseConfigured } from './admin/firebase';
+import { doc, onSnapshot, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { auth, db, googleProvider, isFirebaseConfigured } from './admin/firebase';
 import type { ServiceRequestCategory } from './admin/types';
 import { FLUTTER_FILES_SEGMENT_8 } from './dealerFlutterCode';
 import { FLUTTER_FILES_SEGMENT_9 } from './dealerBulkOrderFlutterCode';
 import { FLUTTER_FILES_SEGMENT_10 } from './serviceBookingFlutterCode';
+import { FLUTTER_FILES_SEGMENT_11 } from './notificationsLocationFlutterCode';
+import { OpenStreetMapPicker, type LatLngPoint } from './OpenStreetMapPicker';
 import {
   fetchConfiguredScheduleSlots,
   setFirestoreScheduleConfigForTesting,
@@ -19,6 +22,24 @@ import {
   type MobileServiceBookingRecord,
   type ScheduleLookupResult,
 } from './mobileServiceBookingService';
+import {
+  attachForegroundFcmListener,
+  DEMO_PREVIEW_NOTIFICATIONS,
+  emitTrustedAdminOrderNotificationForTesting,
+  inspectWebFcmStatus,
+  markAllUserNotificationsAsRead,
+  markUserNotificationAsRead,
+  requestWebNotificationPermissionAndSync,
+  revokeWebDeviceTokenOnSignOut,
+  saveUserDeliveryAddress,
+  subscribeUserDeliveryAddresses,
+  subscribeUserNotifications,
+  validateDeliveryLocationForm,
+  type LocationCaptureSource,
+  type MobileNotificationItem,
+  type SavedDeliveryLocationRecord,
+  type WebFcmStatusSnapshot,
+} from './mobileNotificationsLocationService';
 import {
   Droplets,
   ArrowRight,
@@ -110,7 +131,9 @@ type ScreenId =
   | 'bulk_order_cart'
   | 'dealer_order_history'
   | 'service_booking'
-  | 'booking_confirmation';
+  | 'booking_confirmation'
+  | 'notifications'
+  | 'delivery_location';
 
 export interface Product {
   id: string;
@@ -579,13 +602,103 @@ function getTomorrowIsoDate(): string {
   return d.toISOString().slice(0, 10);
 }
 
+const OSM_NEIGHBORHOOD_PRESETS: Array<{
+  label: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  point: LatLngPoint;
+}> = [
+  {
+    label: 'Bandra West · Mumbai',
+    city: 'Mumbai',
+    state: 'Maharashtra',
+    postalCode: '400050',
+    point: { lat: 19.0596, lng: 72.8295 },
+  },
+  {
+    label: 'Indiranagar · Bengaluru',
+    city: 'Bengaluru',
+    state: 'Karnataka',
+    postalCode: '560038',
+    point: { lat: 12.9784, lng: 77.6408 },
+  },
+  {
+    label: 'Connaught Place · New Delhi',
+    city: 'New Delhi',
+    state: 'Delhi',
+    postalCode: '110001',
+    point: { lat: 28.6315, lng: 77.2167 },
+  },
+];
+
+function formatRelativeNotificationTime(iso: string): string {
+  const parsed = Date.parse(iso);
+  if (Number.isNaN(parsed)) return iso;
+  const diffSec = Math.max(0, Math.floor((Date.now() - parsed) / 1000));
+  if (diffSec < 60) return 'Just now';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return new Date(parsed).toLocaleDateString('en-IN', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+interface ProductStudioImageProps {
+  src: string;
+  alt: string;
+  className?: string;
+  imgClassName?: string;
+}
+
+const ProductStudioImage: React.FC<ProductStudioImageProps> = ({
+  src,
+  alt,
+  className = 'w-16 h-16 rounded-xl',
+  imgClassName = 'object-cover',
+}) => {
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  return (
+    <div
+      className={`relative overflow-hidden bg-slate-100 border border-slate-200/80 flex items-center justify-center shrink-0 ${className}`}
+    >
+      {failed || !src ? (
+        <div className="flex flex-col items-center justify-center text-slate-400 p-2 text-center">
+          <Droplets className="w-5 h-5 text-teal-600/70" />
+        </div>
+      ) : (
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+          className={`w-full h-full ${imgClassName} transition-opacity duration-200 ${
+            loaded ? 'opacity-100' : 'opacity-90'
+          }`}
+        />
+      )}
+    </div>
+  );
+};
+
 export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioProps = {}) {
   const [deviceModel, setDeviceModel] = useState<'pixel' | 'galaxy' | 'compact'>('pixel');
-  const [currentScreen, setCurrentScreen] = useState<ScreenId>('service_booking');
+  const [currentScreen, setCurrentScreen] = useState<ScreenId>('home');
   const [activeTab, setActiveTab] = useState<'simulator' | 'code' | 'instructions'>('simulator');
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
-  const [selectedCodeFile, setSelectedCodeFile] = useState<string>('service_booking_screen.dart');
-  const [segmentCodeTab, setSegmentCodeTab] = useState<'segment10' | 'segment9' | 'segment8'>('segment10');
+  const [selectedCodeFile, setSelectedCodeFile] = useState<string>('notifications_screen.dart');
+  const [segmentCodeTab, setSegmentCodeTab] = useState<
+    'segment11' | 'segment10' | 'segment9' | 'segment8'
+  >('segment11');
 
   // Firebase Auth state for real Cloud Firestore writes & live status streaming
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(() => auth.currentUser);
@@ -598,12 +711,81 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
   const [orders, setOrders] = useState<FullOrder[]>(SAMPLE_ORDERS);
   const [selectedOrder, setSelectedOrder] = useState<FullOrder>(SAMPLE_ORDERS[0]);
   const [isOrdersLoading, setIsOrdersLoading] = useState<boolean>(false);
-  const [activeBottomNav, setActiveBottomNav] = useState<'home' | 'catalog' | 'cart' | 'orders' | 'profile'>('profile');
+  const [activeBottomNav, setActiveBottomNav] = useState<'home' | 'catalog' | 'cart' | 'orders' | 'profile'>('home');
   const [authRole, setAuthRole] = useState<'customer' | 'dealer'>('customer');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [catalogCategory, setCatalogCategory] = useState<string>('All');
-  const [paymentChoice, setPaymentChoice] = useState<'razorpay' | 'cod'>('razorpay');
-  const [cartCount, setCartCount] = useState<number>(3);
+  const [paymentChoice, setPaymentChoice] = useState<'razorpay' | 'cod'>('cod');
+
+  // Controlled Auth Form State & Validation
+  const [loginEmail, setLoginEmail] = useState<string>('sarah.jenkins@example.com');
+  const [loginPassword, setLoginPassword] = useState<string>('PureWater@2026');
+  const [authFormError, setAuthFormError] = useState<string | null>(null);
+  const [regName, setRegName] = useState<string>('Sarah Jenkins');
+  const [regBusinessName, setRegBusinessName] = useState<string>('Jenkins Aqua Distributors');
+  const [regEmail, setRegEmail] = useState<string>('sarah.jenkins@example.com');
+  const [regPhone, setRegPhone] = useState<string>('+91 98765 43210');
+  const [regGstin, setRegGstin] = useState<string>('27AABCU9603R1ZM');
+  const [regPassword, setRegPassword] = useState<string>('PureWater@2026');
+  const [resetEmail, setResetEmail] = useState<string>('sarah.jenkins@example.com');
+
+  // Dynamic Retail Catalog, Product Details, Shopping Cart & Checkout State
+  const [retailSearch, setRetailSearch] = useState<string>('');
+  const [retailSort, setRetailSort] = useState<'featured' | 'price_asc' | 'price_desc' | 'rating'>('featured');
+  const [selectedRetailProduct, setSelectedRetailProduct] = useState<Product>(
+    WHOLESALE_CATALOG_PRODUCTS[0]
+  );
+  const [detailQty, setDetailQty] = useState<number>(1);
+  const [isProductZoomOpen, setIsProductZoomOpen] = useState<boolean>(false);
+  const [isPlacingRetailOrder, setIsPlacingRetailOrder] = useState<boolean>(false);
+  const [retailCart, setRetailCart] = useState<CartItem[]>([
+    { product: WHOLESALE_CATALOG_PRODUCTS[0], quantity: 1 },
+    { product: WHOLESALE_CATALOG_PRODUCTS[2], quantity: 2 },
+  ]);
+
+  const cartCount = useMemo(
+    () => retailCart.reduce((sum, item) => sum + item.quantity, 0),
+    [retailCart]
+  );
+
+  const retailSubtotal = useMemo(
+    () => retailCart.reduce((sum, item) => sum + item.product.retailPrice * item.quantity, 0),
+    [retailCart]
+  );
+
+  const retailDeliveryFee = useMemo(
+    () => (retailCart.length === 0 || retailSubtotal >= 2500 ? 0 : 199),
+    [retailCart.length, retailSubtotal]
+  );
+
+  const retailIncludedGst = useMemo(
+    () => Math.round((retailSubtotal * 18) / 118),
+    [retailSubtotal]
+  );
+
+  const retailGrandTotal = retailSubtotal + retailDeliveryFee;
+
+  const filteredRetailProducts = useMemo(() => {
+    const q = retailSearch.trim().toLowerCase();
+    const filtered = WHOLESALE_CATALOG_PRODUCTS.filter((p) => {
+      const catMatch = catalogCategory === 'All' || p.category === catalogCategory;
+      const queryMatch =
+        !q ||
+        p.name.toLowerCase().includes(q) ||
+        p.category.toLowerCase().includes(q) ||
+        p.description.toLowerCase().includes(q);
+      return catMatch && queryMatch;
+    });
+    const sorted = [...filtered];
+    if (retailSort === 'price_asc') {
+      sorted.sort((a, b) => a.retailPrice - b.retailPrice);
+    } else if (retailSort === 'price_desc') {
+      sorted.sort((a, b) => b.retailPrice - a.retailPrice);
+    } else if (retailSort === 'rating') {
+      sorted.sort((a, b) => b.rating - a.rating);
+    }
+    return sorted;
+  }, [catalogCategory, retailSearch, retailSort]);
 
   // Profile & Address state for Segment 7
   const [profile, setProfile] = useState<UserProfileData>(INITIAL_PROFILE);
@@ -695,29 +877,189 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
     useState<MobileServiceBookingRecord | null>(null);
   const [isMyRequestsDrawerOpen, setIsMyRequestsDrawerOpen] = useState<boolean>(false);
 
+  // =========================================================================
+  // Segment 11: Screen 25 (Notifications + FCM) & Screen 26 (Delivery Location)
+  // =========================================================================
+  const [demoNotifications, setDemoNotifications] = useState<MobileNotificationItem[]>(
+    DEMO_PREVIEW_NOTIFICATIONS
+  );
+  const [firestoreNotifications, setFirestoreNotifications] = useState<MobileNotificationItem[]>(
+    []
+  );
+  const [isLoadingNotifications, setIsLoadingNotifications] = useState<boolean>(false);
+  const [notificationsFilter, setNotificationsFilter] = useState<'all' | 'unread'>('all');
+  const [simulateEmptyInbox, setSimulateEmptyInbox] = useState<boolean>(false);
+  const [fcmStatus, setFcmStatus] = useState<WebFcmStatusSnapshot | null>(null);
+  const [isRequestingFcm, setIsRequestingFcm] = useState<boolean>(false);
+  const [foregroundBannerAlert, setForegroundBannerAlert] = useState<{
+    title: string;
+    body: string;
+  } | null>(null);
+  const [isEmittingOrderEvent, setIsEmittingOrderEvent] = useState<boolean>(false);
+
+  // Screen 26: OpenStreetMap & Manual Delivery Location State
+  const [mapCenter, setMapCenter] = useState<LatLngPoint>({ lat: 19.0596, lng: 72.8295 });
+  const [selectedMapPin, setSelectedMapPin] = useState<LatLngPoint | null>({
+    lat: 19.0596,
+    lng: 72.8295,
+  });
+  const [locationCaptureSource, setLocationCaptureSource] =
+    useState<LocationCaptureSource>('map_pin');
+  const [manualAddressFallbackMode, setManualAddressFallbackMode] = useState<boolean>(false);
+  const [osmTileLoadFailed, setOsmTileLoadFailed] = useState<boolean>(false);
+  const [isLocatingBrowserGps, setIsLocatingBrowserGps] = useState<boolean>(false);
+
+  const [locLabel, setLocLabel] = useState<'Home' | 'Work' | 'Other'>('Home');
+  const [locRecipientName, setLocRecipientName] = useState<string>(INITIAL_PROFILE.fullName);
+  const [locPhone, setLocPhone] = useState<string>(INITIAL_PROFILE.phone);
+  const [locStreetAddress, setLocStreetAddress] = useState<string>(
+    'Flat 402, Green Park Avenue, Link Road'
+  );
+  const [locLandmark, setLocLandmark] = useState<string>('Near Linking Road Promenade');
+  const [locCity, setLocCity] = useState<string>('Mumbai');
+  const [locState, setLocState] = useState<string>('Maharashtra');
+  const [locPostalCode, setLocPostalCode] = useState<string>('400050');
+  const [locInstructions, setLocInstructions] = useState<string>(
+    'Ring bell twice or check in at society security desk'
+  );
+  const [locIsDefault, setLocIsDefault] = useState<boolean>(true);
+  const [locFormErrors, setLocFormErrors] = useState<Record<string, string>>({});
+  const [locSubmitError, setLocSubmitError] = useState<string | null>(null);
+  const [isSavingLocation, setIsSavingLocation] = useState<boolean>(false);
+  const [firestoreSavedLocations, setFirestoreSavedLocations] = useState<
+    SavedDeliveryLocationRecord[]
+  >([]);
+  const [returnScreenAfterLocationSave, setReturnScreenAfterLocationSave] =
+    useState<ScreenId>('address_management');
+
   useEffect(() => {
     if (!isFirebaseConfigured) return;
     const unsub = onAuthStateChanged(auth, (u) => {
       setFirebaseUser(u);
       if (u?.displayName) {
         setServiceContactName(u.displayName);
+        setLocRecipientName(u.displayName);
       }
     });
     return () => unsub();
   }, []);
 
+  // Inspect real Web Notification / FCM status whenever auth state changes
+  useEffect(() => {
+    let active = true;
+    inspectWebFcmStatus(firebaseUser).then((snap) => {
+      if (active) setFcmStatus(snap);
+    });
+    return () => {
+      active = false;
+    };
+  }, [firebaseUser]);
+
+  // Attach foreground FCM listener (`onMessage`) when supported by browser
+  useEffect(() => {
+    let unsubFcm: (() => void) | null = null;
+    attachForegroundFcmListener((payload) => {
+      const title = payload.notification?.title ?? 'Califnco Order Update';
+      const body = payload.notification?.body ?? 'New order notification received in foreground.';
+      setForegroundBannerAlert({ title, body });
+    }).then((fn) => {
+      unsubFcm = fn;
+    });
+    return () => {
+      unsubFcm?.();
+    };
+  }, []);
+
   useEffect(() => {
     if (!isFirebaseConfigured || !firebaseUser || !firebaseUser.emailVerified) {
       setFirestoreCustomerBookings([]);
+      setFirestoreNotifications([]);
+      setFirestoreSavedLocations([]);
       return;
     }
-    const unsub = subscribeCustomerServiceRequests(firebaseUser.uid, {
+    const unsubBookings = subscribeCustomerServiceRequests(firebaseUser.uid, {
       onRequests: (records) => {
         setFirestoreCustomerBookings(records);
       },
     });
-    return () => unsub();
+
+    setIsLoadingNotifications(true);
+    const unsubNotifs = subscribeUserNotifications(firebaseUser.uid, {
+      onNotifications: (items) => {
+        setFirestoreNotifications(items);
+        setIsLoadingNotifications(false);
+      },
+      onError: () => {
+        setIsLoadingNotifications(false);
+      },
+    });
+
+    const unsubAddresses = subscribeUserDeliveryAddresses(firebaseUser.uid, {
+      onAddresses: (records) => {
+        setFirestoreSavedLocations(records);
+        if (records.length > 0) {
+          const mapped: AddressItem[] = records.map((r) => ({
+            id: r.addressId,
+            userId: r.userId,
+            recipientName: r.recipientName,
+            phone: r.phone,
+            streetAddress: r.landmark
+              ? `${r.streetAddress} (${r.landmark})`
+              : r.streetAddress,
+            city: r.city,
+            state: r.state,
+            postalCode: r.postalCode,
+            deliveryInstructions: r.deliveryInstructions,
+            label: r.label,
+            isDefault: r.isDefault,
+          }));
+          setAddresses(mapped);
+        }
+      },
+    });
+
+    const unsubDealers = onSnapshot(
+      doc(db, 'dealers', firebaseUser.uid),
+      (snap) => {
+        if (!snap.exists()) return;
+        const d = snap.data();
+        const statusRaw = String(d.approvalStatus ?? 'pending');
+        const approvalStatus: DealerApprovalStatus =
+          statusRaw === 'approved' || statusRaw === 'rejected' ? statusRaw : 'pending';
+        setDealerProfile((prev) => ({
+          ...prev,
+          uid: firebaseUser.uid,
+          dealerId: String(d.dealerCode ?? d.dealerId ?? prev.dealerId),
+          businessName: String(d.businessName ?? prev.businessName),
+          contactPerson: String(d.contactPerson ?? prev.contactPerson),
+          gstin: String(d.gstin ?? prev.gstin),
+          approvalStatus,
+          creditLimit: Number(d.creditLimit ?? 0),
+          availableCredit: Number(d.availableCredit ?? 0),
+          wholesaleTier: String(d.wholesaleTier ?? prev.wholesaleTier),
+        }));
+      },
+      () => {
+        // Non-dealer accounts simply keep local simulator dealer profile
+      }
+    );
+
+    return () => {
+      unsubBookings();
+      unsubNotifs();
+      unsubAddresses();
+      unsubDealers();
+    };
   }, [firebaseUser]);
+
+  useEffect(() => {
+    if (!isProductZoomOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsProductZoomOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isProductZoomOpen]);
 
   // Query configured scheduling system (/service_schedules/{date}_{pin}) whenever date or PIN changes
   useEffect(() => {
@@ -825,13 +1167,279 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
   const handleMobileGoogleSignIn = async () => {
     try {
       await signInWithPopup(auth, googleProvider);
-      showToast('Signed in with Google. Service requests now persist directly to Cloud Firestore.');
+      setAuthFormError(null);
+      showToast('Signed in with Google. Live Cloud Firestore persistence active.');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes('popup-closed-by-user')) {
         showToast(msg);
       }
     }
+  };
+
+  const addToRetailCart = (product: Product, qtyToAdd: number = 1) => {
+    if (product.stockQuantity <= 0) {
+      showToast('This item is currently out of stock.');
+      return;
+    }
+    setRetailCart((prev) => {
+      const idx = prev.findIndex((c) => c.product.id === product.id);
+      if (idx >= 0) {
+        const updated = [...prev];
+        const nextQty = Math.min(product.stockQuantity, updated[idx].quantity + qtyToAdd);
+        updated[idx] = { ...updated[idx], quantity: nextQty };
+        return updated;
+      }
+      return [...prev, { product, quantity: Math.min(product.stockQuantity, Math.max(1, qtyToAdd)) }];
+    });
+    showToast(`Added ${product.name} to cart.`);
+  };
+
+  const updateRetailCartQty = (productId: string, delta: number) => {
+    setRetailCart((prev) =>
+      prev
+        .map((item) => {
+          if (item.product.id !== productId) return item;
+          const next = item.quantity + delta;
+          if (next <= 0) return null;
+          return { ...item, quantity: Math.min(item.product.stockQuantity, next) };
+        })
+        .filter((x): x is CartItem => x !== null)
+    );
+  };
+
+  const removeFromRetailCart = (productId: string) => {
+    setRetailCart((prev) => prev.filter((item) => item.product.id !== productId));
+    showToast('Removed item from cart.');
+  };
+
+  const handlePlaceRetailOrder = async () => {
+    if (isPlacingRetailOrder || retailCart.length === 0) return;
+    if (!defaultDeliveryAddress.streetAddress.trim() || !defaultDeliveryAddress.postalCode.trim()) {
+      showToast('Please select or enter a valid delivery address before placing your order.');
+      return;
+    }
+
+    setIsPlacingRetailOrder(true);
+    try {
+      const numericSuffix = Math.floor(10000 + Math.random() * 89999);
+      const orderNumber = `CALIF-${numericSuffix}`;
+      const orderId = `ord-${numericSuffix}`;
+      const nowIso = new Date().toISOString();
+      const totalUnits = retailCart.reduce((s, c) => s + c.quantity, 0);
+
+      let persistedLive = false;
+      // Persist COD orders to live Cloud Firestore when signed in with a verified email.
+      // Razorpay client-side test checkouts are intentionally NOT marked 'paid' in Firestore
+      // because no server-side Razorpay Order + HMAC-SHA256 webhook secret is configured.
+      if (isFirebaseConfigured && firebaseUser?.emailVerified && paymentChoice === 'cod') {
+        const batch = writeBatch(db);
+        const ts = serverTimestamp();
+        const safePostal = defaultDeliveryAddress.postalCode
+          .replace(/[^0-9A-Za-z\- ]/g, '')
+          .trim()
+          .slice(0, 16) || '400050';
+        const partyId = `CUST-${firebaseUser.uid.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8) || 'USER01'}`;
+
+        batch.set(doc(db, 'orders', orderId), {
+          orderNumber,
+          channel: 'customer',
+          customerUid: firebaseUser.uid,
+          partyId,
+          partyDisplayName: (defaultDeliveryAddress.recipientName || profile.fullName).slice(0, 120),
+          regionCity: `${defaultDeliveryAddress.city}, ${defaultDeliveryAddress.state}`.slice(0, 80),
+          orderDateIso: nowIso,
+          itemCount: totalUnits,
+          subtotalAmount: retailSubtotal,
+          deliveryAmount: retailDeliveryFee,
+          totalAmount: retailGrandTotal,
+          paymentStatus: 'cod_pending',
+          fulfilmentStatus: 'pending',
+          createdByUid: firebaseUser.uid,
+          createdAt: ts,
+          updatedAt: ts,
+        });
+
+        retailCart.forEach((entry, idx) => {
+          const itemId = `item-${idx + 1}`;
+          batch.set(doc(db, 'orders', orderId, 'items', itemId), {
+            orderId,
+            customerUid: firebaseUser.uid,
+            sku: entry.product.id.toUpperCase(),
+            productName: entry.product.name.slice(0, 160),
+            category: entry.product.category,
+            quantity: entry.quantity,
+            unitPrice: entry.product.retailPrice,
+            lineTotal: entry.product.retailPrice * entry.quantity,
+            createdAt: ts,
+          });
+        });
+
+        batch.set(doc(db, 'orders', orderId, 'private_details', 'shipping'), {
+          orderId,
+          recipientName: defaultDeliveryAddress.recipientName.slice(0, 120),
+          email: (firebaseUser.email || profile.email).slice(0, 160),
+          phone: defaultDeliveryAddress.phone.slice(0, 24),
+          shippingAddress: `${defaultDeliveryAddress.streetAddress}, ${defaultDeliveryAddress.city}, ${defaultDeliveryAddress.state}`.slice(0, 320),
+          postalCode: safePostal,
+          gstin: '',
+          dispatchNotes: (defaultDeliveryAddress.deliveryInstructions || '').slice(0, 400),
+          createdAt: ts,
+          updatedAt: ts,
+        });
+
+        await batch.commit();
+        persistedLive = true;
+      }
+
+      const newOrder: FullOrder = {
+        id: orderId,
+        orderNumber,
+        userId: firebaseUser?.uid ?? profile.uid,
+        items: retailCart.map((c) => ({
+          productId: c.product.id,
+          productName: c.product.name,
+          quantity: c.quantity,
+          unitPrice: c.product.retailPrice,
+          imageUrl: c.product.imageUrl,
+        })),
+        subtotal: retailSubtotal,
+        deliveryFee: retailDeliveryFee,
+        totalAmount: retailGrandTotal,
+        paymentMethod: paymentChoice,
+        paymentStatus: 'pending',
+        orderStatus: 'confirmed',
+        deliveryAddress: {
+          name: defaultDeliveryAddress.recipientName,
+          phone: defaultDeliveryAddress.phone,
+          address: defaultDeliveryAddress.streetAddress,
+          city: defaultDeliveryAddress.city,
+          pincode: defaultDeliveryAddress.postalCode,
+        },
+        createdAt: 'Just now',
+        estimatedDelivery: 'Technician dispatch scheduled within 48–72 hrs after verification',
+        timeline: [
+          {
+            status:
+              paymentChoice === 'cod'
+                ? 'Order Submitted (COD — Pay on Delivery)'
+                : 'Test Checkout Recorded (Gateway Signature Pending)',
+            time: 'Just now',
+            completed: true,
+            current: true,
+          },
+          { status: 'Warehouse Allocation & Pre-Inspection', time: 'Pending', completed: false },
+          { status: 'Dispatched with Technician', time: 'Pending', completed: false },
+          { status: 'Delivered & Installed', time: 'Pending', completed: false },
+        ],
+      };
+
+      setOrders((prev) => [newOrder, ...prev]);
+      setSelectedOrder(newOrder);
+      setRetailCart([]);
+      setCurrentScreen('order_confirmation');
+      showToast(
+        persistedLive
+          ? `Order #${orderNumber} saved to Cloud Firestore (COD Pending).`
+          : paymentChoice === 'cod'
+          ? `Order #${orderNumber} recorded (COD — Pay on Delivery).`
+          : `Test order #${orderNumber} recorded (Gateway payment unverified without backend webhook).`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(msg);
+    } finally {
+      setIsPlacingRetailOrder(false);
+    }
+  };
+
+  const handleAuthLoginSubmit = () => {
+    const emailTrimmed = loginEmail.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTrimmed)) {
+      setAuthFormError('Enter a valid email address to sign in.');
+      return;
+    }
+    if (loginPassword.trim().length < 8) {
+      setAuthFormError('Password must be at least 8 characters.');
+      return;
+    }
+    setAuthFormError(null);
+    if (authRole === 'dealer') {
+      setCurrentScreen('dealer_home');
+      showToast(`Signed in to Dealer Hub (${dealerProfile.approvalStatus.toUpperCase()}).`);
+    } else {
+      setProfile((prev) => ({ ...prev, email: emailTrimmed }));
+      setCurrentScreen('home');
+      showToast('Signed in to Califnco Customer Store.');
+    }
+  };
+
+  const handleAuthRegisterSubmit = async () => {
+    const nameTrim = regName.trim();
+    const emailTrim = regEmail.trim();
+    const phoneDigits = regPhone.replace(/\D/g, '');
+    const gstinClean = regGstin.trim().toUpperCase();
+
+    if (nameTrim.length < 2) {
+      setAuthFormError('Enter your full name (minimum 2 characters).');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTrim)) {
+      setAuthFormError('Enter a valid email address.');
+      return;
+    }
+    if (phoneDigits.length < 10) {
+      setAuthFormError('Enter a valid 10-digit contact phone number.');
+      return;
+    }
+    if (authRole === 'dealer') {
+      if (regBusinessName.trim().length < 2) {
+        setAuthFormError('Enter your registered business or firm name.');
+        return;
+      }
+      if (!/^[0-9]{2}[A-Z0-9]{13}$/.test(gstinClean)) {
+        setAuthFormError('Enter a valid 15-character alphanumeric GSTIN (e.g. 27AABCU9603R1ZM).');
+        return;
+      }
+    }
+    if (regPassword.length < 8) {
+      setAuthFormError('Choose a password with at least 8 characters.');
+      return;
+    }
+
+    setAuthFormError(null);
+
+    if (authRole === 'dealer') {
+      const codeSuffix = Math.floor(1000 + Math.random() * 8999);
+      const dealerCode = `DLR-APP-${codeSuffix}`;
+      setDealerProfile({
+        uid: firebaseUser?.uid ?? `dealer_${codeSuffix}`,
+        dealerId: dealerCode,
+        businessName: regBusinessName.trim(),
+        contactPerson: nameTrim,
+        email: emailTrim,
+        phone: regPhone.trim(),
+        gstin: gstinClean,
+        approvalStatus: 'pending',
+        creditLimit: 0,
+        availableCredit: 0,
+        wholesaleTier: 'Application Pending Verification',
+        registeredWarehouse: `${defaultDeliveryAddress.streetAddress}, ${defaultDeliveryAddress.city}`,
+      });
+      setCurrentScreen('dealer_home');
+      showToast('Dealer application submitted. Status set to PENDING administrator review.');
+      return;
+    }
+
+    setProfile((prev) => ({
+      ...prev,
+      fullName: nameTrim,
+      email: emailTrim,
+      phone: regPhone.trim(),
+    }));
+    setLoginEmail(emailTrim);
+    setCurrentScreen('home');
+    showToast('Customer account created.');
   };
 
   const handleSelectSavedServiceAddress = (addrId: string) => {
@@ -899,6 +1507,215 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
       setServiceSubmitError(raw);
     } finally {
       setIsSubmittingService(false);
+    }
+  };
+
+  const activeNotifications = useMemo<MobileNotificationItem[]>(() => {
+    if (simulateEmptyInbox) return [];
+    if (firebaseUser && firebaseUser.emailVerified) {
+      return firestoreNotifications;
+    }
+    return demoNotifications;
+  }, [simulateEmptyInbox, firebaseUser, firestoreNotifications, demoNotifications]);
+
+  const unreadNotificationCount = useMemo(
+    () => activeNotifications.filter((n) => !n.isRead).length,
+    [activeNotifications]
+  );
+
+  const defaultDeliveryAddress = useMemo<AddressItem>(
+    () => addresses.find((a) => a.isDefault) ?? addresses[0] ?? INITIAL_ADDRESSES[0],
+    [addresses]
+  );
+
+  const handleMarkNotificationRead = async (item: MobileNotificationItem) => {
+    if (item.isRead) return;
+    if (item.persistedToFirestore) {
+      try {
+        await markUserNotificationAsRead(item.id);
+        showToast('Marked notification as read in Cloud Firestore.');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        showToast(msg);
+      }
+    } else {
+      setDemoNotifications((prev) =>
+        prev.map((n) =>
+          n.id === item.id ? { ...n, isRead: true, readAtIso: new Date().toISOString() } : n
+        )
+      );
+      showToast('Marked demo notification as read.');
+    }
+  };
+
+  const handleMarkAllNotificationsRead = async () => {
+    const unread = activeNotifications.filter((n) => !n.isRead);
+    if (unread.length === 0) return;
+
+    if (firebaseUser && firebaseUser.emailVerified) {
+      try {
+        await markAllUserNotificationsAsRead(
+          unread.filter((n) => n.persistedToFirestore).map((n) => n.id)
+        );
+        showToast('Marked all notifications as read.');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        showToast(msg);
+      }
+    } else {
+      const nowIso = new Date().toISOString();
+      setDemoNotifications((prev) =>
+        prev.map((n) => (n.isRead ? n : { ...n, isRead: true, readAtIso: nowIso }))
+      );
+      showToast('Marked all demo notifications as read.');
+    }
+  };
+
+  const handleRequestPushPermissions = async () => {
+    if (isRequestingFcm) return;
+    setIsRequestingFcm(true);
+    try {
+      const snap = await requestWebNotificationPermissionAndSync(firebaseUser);
+      setFcmStatus(snap);
+      showToast(snap.summaryTitle);
+    } finally {
+      setIsRequestingFcm(false);
+    }
+  };
+
+  const handleEmitTrustedOrderEvent = async (
+    eventType: 'order_confirmed' | 'order_dispatched' | 'order_delivered'
+  ) => {
+    if (isEmittingOrderEvent) return;
+    setIsEmittingOrderEvent(true);
+    setSimulateEmptyInbox(false);
+    try {
+      const recipientUid = firebaseUser?.uid ?? 'user_sarah';
+      const created = await emitTrustedAdminOrderNotificationForTesting({
+        recipientUid,
+        orderNumber: 'CALIF-82941',
+        eventType,
+      });
+      if (!created.persistedToFirestore) {
+        setDemoNotifications((prev) => [created, ...prev]);
+      }
+      setForegroundBannerAlert({
+        title: created.title,
+        body: created.persistedToFirestore
+          ? 'Foreground inbox event synced from Cloud Firestore (no push fabricated).'
+          : 'Simulated foreground alert banner (connect Google Auth for live Firestore write).',
+      });
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      showToast(
+        raw.includes('permission') || raw.includes('insufficient')
+          ? 'Blocked by Firestore rules: only trusted backend / verified Admin can create notifications.'
+          : raw
+      );
+    } finally {
+      setIsEmittingOrderEvent(false);
+    }
+  };
+
+  const handleBrowserLocateMe = () => {
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) {
+      showToast('Geolocation API unavailable; use map tap or manual address entry.');
+      return;
+    }
+    setIsLocatingBrowserGps(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const pt = {
+          lat: Number(pos.coords.latitude.toFixed(6)),
+          lng: Number(pos.coords.longitude.toFixed(6)),
+        };
+        setManualAddressFallbackMode(false);
+        setSelectedMapPin(pt);
+        setMapCenter(pt);
+        setLocationCaptureSource('gps_pin');
+        setIsLocatingBrowserGps(false);
+        showToast(
+          'GPS pin placed. Confirm your street address & PIN below (coordinates do not verify postal address).'
+        );
+      },
+      () => {
+        setIsLocatingBrowserGps(false);
+        showToast(
+          'Location permission unavailable in preview frame. Tap the map or enter address manually.'
+        );
+      },
+      { enableHighAccuracy: true, timeout: 7000 }
+    );
+  };
+
+  const handleSaveDeliveryLocation = async () => {
+    if (isSavingLocation) return;
+    setLocSubmitError(null);
+
+    const includeCoordinates =
+      !manualAddressFallbackMode && !osmTileLoadFailed && selectedMapPin !== null;
+
+    const payload = {
+      label: locLabel,
+      recipientName: locRecipientName,
+      phone: locPhone,
+      streetAddress: locStreetAddress,
+      landmark: locLandmark,
+      city: locCity,
+      state: locState,
+      postalCode: locPostalCode,
+      deliveryInstructions: locInstructions,
+      isDefault: locIsDefault,
+      hasCoordinates: includeCoordinates,
+      latitude: includeCoordinates && selectedMapPin ? selectedMapPin.lat : 0,
+      longitude: includeCoordinates && selectedMapPin ? selectedMapPin.lng : 0,
+      locationSource: includeCoordinates ? locationCaptureSource : ('manual_only' as const),
+    };
+
+    const validationErrors = validateDeliveryLocationForm(payload);
+    setLocFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
+      setLocSubmitError('Please complete all required postal address fields before saving.');
+      return;
+    }
+
+    setIsSavingLocation(true);
+    try {
+      const saved = await saveUserDeliveryAddress(payload);
+      if (!saved.persistedToFirestore) {
+        const mappedAddr: AddressItem = {
+          id: saved.addressId,
+          userId: saved.userId,
+          recipientName: saved.recipientName,
+          phone: saved.phone,
+          streetAddress: saved.landmark
+            ? `${saved.streetAddress} (${saved.landmark})`
+            : saved.streetAddress,
+          city: saved.city,
+          state: saved.state,
+          postalCode: saved.postalCode,
+          deliveryInstructions: saved.deliveryInstructions,
+          label: saved.label,
+          isDefault: saved.isDefault,
+        };
+        setAddresses((prev) =>
+          saved.isDefault
+            ? [mappedAddr, ...prev.map((a) => ({ ...a, isDefault: false }))]
+            : [mappedAddr, ...prev]
+        );
+      }
+
+      setCurrentScreen(returnScreenAfterLocationSave);
+      showToast(
+        saved.persistedToFirestore
+          ? `Saved ${saved.label} delivery address to Cloud Firestore (${saved.hasCoordinates ? 'Pin + Manual Postal' : 'Manual Postal'}).`
+          : `Saved ${saved.label} delivery address in simulator preview.`
+      );
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      setLocSubmitError(raw);
+    } finally {
+      setIsSavingLocation(false);
     }
   };
 
@@ -2478,7 +3295,9 @@ class OrderDetailViewScreen extends StatelessWidget {
   };
 
   const flutterFiles =
-    segmentCodeTab === 'segment10'
+    segmentCodeTab === 'segment11'
+      ? FLUTTER_FILES_SEGMENT_11
+      : segmentCodeTab === 'segment10'
       ? FLUTTER_FILES_SEGMENT_10
       : segmentCodeTab === 'segment9'
       ? FLUTTER_FILES_SEGMENT_9
@@ -2511,8 +3330,8 @@ class OrderDetailViewScreen extends StatelessWidget {
           <button
             type="button"
             onClick={() => {
-              setSegmentCodeTab('segment10');
-              setSelectedCodeFile('service_booking_screen.dart');
+              setSegmentCodeTab('segment11');
+              setSelectedCodeFile('notifications_screen.dart');
               setActiveTab('code');
             }}
             className={`py-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 ${
@@ -2550,9 +3369,10 @@ class OrderDetailViewScreen extends StatelessWidget {
           {firebaseUser ? (
             <button
               type="button"
-              onClick={() => {
-                void signOut(auth);
-                showToast('Signed out of Firebase session.');
+              onClick={async () => {
+                await revokeWebDeviceTokenOnSignOut(firebaseUser.uid);
+                await signOut(auth);
+                showToast('Revoked device FCM token and signed out of Firebase session.');
               }}
               className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               title={`Connected to Cloud Firestore as ${firebaseUser.email || firebaseUser.uid}`}
@@ -2642,65 +3462,97 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                 {/* ================= SCREEN 2: LOGIN SCREEN ================= */}
                 {currentScreen === 'login' && (
-                  <div className="flex-1 flex flex-col bg-white overflow-hidden p-6 justify-between">
+                  <div className="flex-1 flex flex-col bg-white overflow-y-auto p-6 justify-between">
                     <div>
-                      <div className="flex items-center gap-2 mb-6">
-                        <div className="w-8 h-8 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center font-bold">
+                      <div className="flex items-center gap-2 mb-5">
+                        <div className="w-8 h-8 rounded-xl bg-teal-50 text-teal-700 border border-teal-200 flex items-center justify-center font-bold">
                           <Droplets className="w-4 h-4" />
                         </div>
-                        <span className="font-extrabold text-sm text-[#0A2540]">CALIFNCO LOGIN</span>
+                        <span className="font-extrabold text-xs tracking-wide text-[#0A2540]">CALIFNCO ACCESS</span>
                       </div>
 
                       <h2 className="text-lg font-black text-[#0A2540]">Welcome Back</h2>
-                      <p className="text-xs text-slate-400 mb-5">Sign in to manage your orders & purifiers</p>
+                      <p className="text-xs text-slate-500 mb-4">Sign in to manage orders, purifiers, or B2B procurement</p>
 
                       {/* Account Role Selector */}
-                      <div className="flex bg-slate-100 p-1 rounded-xl mb-4 text-xs font-semibold">
+                      <div className="flex bg-slate-100 p-1 rounded-xl mb-4 text-xs font-semibold" role="tablist" aria-label="Account Role">
                         <button
-                          onClick={() => setAuthRole('customer')}
-                          className={`flex-1 py-1.5 rounded-lg transition-all ${
-                            authRole === 'customer' ? 'bg-white text-[#0A2540] shadow-xs' : 'text-slate-500'
+                          type="button"
+                          onClick={() => {
+                            setAuthRole('customer');
+                            setLoginEmail('sarah.jenkins@example.com');
+                            setAuthFormError(null);
+                          }}
+                          className={`flex-1 min-h-[40px] py-1.5 rounded-lg transition-colors cursor-pointer ${
+                            authRole === 'customer' ? 'bg-white text-[#0A2540] shadow-xs font-bold' : 'text-slate-600'
                           }`}
                         >
                           Customer
                         </button>
                         <button
-                          onClick={() => setAuthRole('dealer')}
-                          className={`flex-1 py-1.5 rounded-lg transition-all ${
-                            authRole === 'dealer' ? 'bg-white text-[#0A2540] shadow-xs' : 'text-slate-500'
+                          type="button"
+                          onClick={() => {
+                            setAuthRole('dealer');
+                            setLoginEmail('vikram@aquapuresolutions.in');
+                            setAuthFormError(null);
+                          }}
+                          className={`flex-1 min-h-[40px] py-1.5 rounded-lg transition-colors cursor-pointer ${
+                            authRole === 'dealer' ? 'bg-white text-[#0A2540] shadow-xs font-bold' : 'text-slate-600'
                           }`}
                         >
                           Dealer Partner
                         </button>
                       </div>
 
+                      {authFormError && (
+                        <div role="alert" className="mb-3 p-2.5 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800 flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                          <span>{authFormError}</span>
+                        </div>
+                      )}
+
                       {/* Form Inputs */}
                       <div className="space-y-3 text-xs">
                         <div>
-                          <label className="block text-[11px] font-bold text-slate-700 mb-1">Email Address</label>
-                          <div className="flex items-center border border-slate-200 rounded-xl px-3 py-2 bg-slate-50 focus-within:border-teal-500">
-                            <Mail className="w-3.5 h-3.5 text-slate-400 mr-2" />
+                          <label htmlFor="mobile-login-email" className="block text-[11px] font-bold text-slate-700 mb-1">
+                            Email Address
+                          </label>
+                          <div className="flex items-center border border-slate-200 rounded-xl px-3 min-h-[44px] bg-slate-50 focus-within:border-teal-600 focus-within:bg-white">
+                            <Mail className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
                             <input
+                              id="mobile-login-email"
                               type="email"
-                              defaultValue={authRole === 'customer' ? 'sarah.jenkins@example.com' : 'dealer@califnco.in'}
-                              className="w-full bg-transparent outline-none text-slate-800 text-xs"
+                              value={loginEmail}
+                              onChange={(e) => {
+                                setLoginEmail(e.target.value);
+                                if (authFormError) setAuthFormError(null);
+                              }}
+                              placeholder="you@example.com"
+                              className="w-full bg-transparent outline-none text-slate-900 text-xs"
                             />
                           </div>
                         </div>
 
                         <div>
-                          <label className="block text-[11px] font-bold text-slate-700 mb-1">Password</label>
-                          <div className="flex items-center border border-slate-200 rounded-xl px-3 py-2 bg-slate-50 focus-within:border-teal-500">
-                            <Lock className="w-3.5 h-3.5 text-slate-400 mr-2" />
+                          <label htmlFor="mobile-login-password" className="block text-[11px] font-bold text-slate-700 mb-1">
+                            Password
+                          </label>
+                          <div className="flex items-center border border-slate-200 rounded-xl px-3 min-h-[44px] bg-slate-50 focus-within:border-teal-600 focus-within:bg-white">
+                            <Lock className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
                             <input
+                              id="mobile-login-password"
                               type={showPassword ? 'text' : 'password'}
-                              defaultValue="PureWater@2026"
-                              className="w-full bg-transparent outline-none text-slate-800 text-xs"
+                              value={loginPassword}
+                              onChange={(e) => {
+                                setLoginPassword(e.target.value);
+                                if (authFormError) setAuthFormError(null);
+                              }}
+                              className="w-full bg-transparent outline-none text-slate-900 text-xs"
                             />
                             <button
                               type="button"
                               onClick={() => setShowPassword(!showPassword)}
-                              className="text-slate-400 hover:text-slate-600 text-[10px] font-semibold"
+                              className="min-h-[36px] px-2 text-slate-500 hover:text-slate-800 text-[10.5px] font-semibold cursor-pointer"
                             >
                               {showPassword ? 'Hide' : 'Show'}
                             </button>
@@ -2709,8 +3561,12 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                         <div className="text-right">
                           <button
-                            onClick={() => setCurrentScreen('forgot_password')}
-                            className="text-[11px] font-semibold text-teal-600 hover:underline"
+                            type="button"
+                            onClick={() => {
+                              setAuthFormError(null);
+                              setCurrentScreen('forgot_password');
+                            }}
+                            className="min-h-[36px] text-[11px] font-semibold text-teal-700 hover:underline cursor-pointer"
                           >
                             Forgot Password?
                           </button>
@@ -2718,19 +3574,34 @@ class OrderDetailViewScreen extends StatelessWidget {
                       </div>
                     </div>
 
-                    <div className="space-y-3 pt-4">
+                    <div className="space-y-2.5 pt-4">
                       <button
-                        onClick={() => setCurrentScreen('home')}
-                        className="w-full py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-md"
+                        type="button"
+                        onClick={handleAuthLoginSubmit}
+                        className="w-full min-h-[44px] py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-sm transition-colors cursor-pointer"
                       >
-                        Sign In as {authRole === 'customer' ? 'Customer' : 'Dealer'}
+                        Sign In as {authRole === 'customer' ? 'Customer' : 'Dealer Partner'}
                       </button>
 
-                      <div className="text-center text-xs text-slate-500">
-                        Don't have an account?{' '}
+                      {!firebaseUser && isFirebaseConfigured && (
                         <button
-                          onClick={() => setCurrentScreen('register')}
-                          className="font-bold text-teal-600 hover:underline"
+                          type="button"
+                          onClick={handleMobileGoogleSignIn}
+                          className="w-full min-h-[44px] py-2.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 rounded-xl font-semibold text-xs transition-colors cursor-pointer"
+                        >
+                          Continue with Google (Live Firestore)
+                        </button>
+                      )}
+
+                      <div className="text-center text-xs text-slate-500 pt-1">
+                        Don&apos;t have an account?{' '}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAuthFormError(null);
+                            setCurrentScreen('register');
+                          }}
+                          className="font-bold text-teal-700 hover:underline cursor-pointer"
                         >
                           Register
                         </button>
@@ -2743,69 +3614,124 @@ class OrderDetailViewScreen extends StatelessWidget {
                 {currentScreen === 'register' && (
                   <div className="flex-1 flex flex-col bg-white overflow-y-auto p-5 text-xs">
                     <button
-                      onClick={() => setCurrentScreen('login')}
-                      className="flex items-center gap-1 text-slate-500 mb-3 hover:text-slate-800"
+                      type="button"
+                      onClick={() => {
+                        setAuthFormError(null);
+                        setCurrentScreen('login');
+                      }}
+                      className="flex items-center gap-1 min-h-[40px] text-slate-600 mb-2 hover:text-slate-900 cursor-pointer self-start"
                     >
                       <ArrowLeft className="w-4 h-4" />
                       <span>Back to Login</span>
                     </button>
 
                     <h2 className="text-lg font-black text-[#0A2540]">Create Account</h2>
-                    <p className="text-slate-400 text-[11px] mb-4">Join Califnco for certified pure water systems</p>
+                    <p className="text-slate-500 text-[11px] mb-3">Join Califnco for certified water purification systems</p>
 
-                    <div className="flex bg-slate-100 p-1 rounded-xl mb-4 text-xs font-semibold">
+                    <div className="flex bg-slate-100 p-1 rounded-xl mb-3 text-xs font-semibold">
                       <button
-                        onClick={() => setAuthRole('customer')}
-                        className={`flex-1 py-1.5 rounded-lg ${authRole === 'customer' ? 'bg-white text-[#0A2540] shadow-xs' : 'text-slate-500'}`}
+                        type="button"
+                        onClick={() => {
+                          setAuthRole('customer');
+                          setAuthFormError(null);
+                        }}
+                        className={`flex-1 min-h-[38px] py-1.5 rounded-lg cursor-pointer ${
+                          authRole === 'customer' ? 'bg-white text-[#0A2540] shadow-xs font-bold' : 'text-slate-600'
+                        }`}
                       >
                         Customer
                       </button>
                       <button
-                        onClick={() => setAuthRole('dealer')}
-                        className={`flex-1 py-1.5 rounded-lg ${authRole === 'dealer' ? 'bg-white text-[#0A2540] shadow-xs' : 'text-slate-500'}`}
+                        type="button"
+                        onClick={() => {
+                          setAuthRole('dealer');
+                          setAuthFormError(null);
+                        }}
+                        className={`flex-1 min-h-[38px] py-1.5 rounded-lg cursor-pointer ${
+                          authRole === 'dealer' ? 'bg-white text-[#0A2540] shadow-xs font-bold' : 'text-slate-600'
+                        }`}
                       >
-                        Dealer
+                        Dealer Applicant
                       </button>
                     </div>
+
+                    {authFormError && (
+                      <div role="alert" className="mb-3 p-2.5 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800 flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                        <span>{authFormError}</span>
+                      </div>
+                    )}
 
                     <div className="space-y-2.5">
                       <div>
                         <label className="block text-[10.5px] font-bold text-slate-700 mb-0.5">Full Name</label>
-                        <input className="w-full border border-slate-200 rounded-xl px-3 py-1.5 text-xs bg-slate-50" defaultValue="Sarah Jenkins" />
+                        <input
+                          value={regName}
+                          onChange={(e) => setRegName(e.target.value)}
+                          className="w-full min-h-[42px] border border-slate-200 rounded-xl px-3 py-2 text-xs bg-slate-50 focus:bg-white"
+                        />
                       </div>
+                      {authRole === 'dealer' && (
+                        <div>
+                          <label className="block text-[10.5px] font-bold text-slate-700 mb-0.5">Registered Business Name</label>
+                          <input
+                            value={regBusinessName}
+                            onChange={(e) => setRegBusinessName(e.target.value)}
+                            className="w-full min-h-[42px] border border-slate-200 rounded-xl px-3 py-2 text-xs bg-slate-50 focus:bg-white"
+                          />
+                        </div>
+                      )}
                       <div>
                         <label className="block text-[10.5px] font-bold text-slate-700 mb-0.5">Email Address</label>
-                        <input className="w-full border border-slate-200 rounded-xl px-3 py-1.5 text-xs bg-slate-50" defaultValue="sarah@example.com" />
+                        <input
+                          type="email"
+                          value={regEmail}
+                          onChange={(e) => setRegEmail(e.target.value)}
+                          className="w-full min-h-[42px] border border-slate-200 rounded-xl px-3 py-2 text-xs bg-slate-50 focus:bg-white"
+                        />
                       </div>
                       <div>
                         <label className="block text-[10.5px] font-bold text-slate-700 mb-0.5">Phone Number</label>
-                        <input className="w-full border border-slate-200 rounded-xl px-3 py-1.5 text-xs bg-slate-50" defaultValue="+91 98765 43210" />
+                        <input
+                          type="tel"
+                          value={regPhone}
+                          onChange={(e) => setRegPhone(e.target.value)}
+                          className="w-full min-h-[42px] border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono tabular-nums bg-slate-50 focus:bg-white"
+                        />
                       </div>
                       {authRole === 'dealer' && (
                         <>
-                          <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[10.5px] text-amber-900">
-                            <strong>Notice:</strong> Dealer registration requires administrator review. Wholesale access is granted only after tax/GST verification.
+                          <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[10.5px] text-amber-950 leading-relaxed">
+                            <strong>Compliance Gate:</strong> New dealer accounts start as <strong>Pending</strong>. Wholesale margins and bulk PO checkout unlock only after administrator verification.
                           </div>
                           <div>
-                            <label className="block text-[10.5px] font-bold text-slate-700 mb-0.5">GST / Tax Number</label>
-                            <input className="w-full border border-slate-200 rounded-xl px-3 py-1.5 text-xs bg-slate-50" defaultValue="27AAAAA0000A1Z5" />
+                            <label className="block text-[10.5px] font-bold text-slate-700 mb-0.5">15-Digit GSTIN</label>
+                            <input
+                              value={regGstin}
+                              maxLength={15}
+                              onChange={(e) => setRegGstin(e.target.value.toUpperCase())}
+                              className="w-full min-h-[42px] border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono uppercase tabular-nums bg-slate-50 focus:bg-white"
+                            />
                           </div>
                         </>
                       )}
                       <div>
-                        <label className="block text-[10.5px] font-bold text-slate-700 mb-0.5">Password</label>
-                        <input className="w-full border border-slate-200 rounded-xl px-3 py-1.5 text-xs bg-slate-50" type="password" defaultValue="••••••••" />
+                        <label className="block text-[10.5px] font-bold text-slate-700 mb-0.5">Password (min 8 characters)</label>
+                        <input
+                          type="password"
+                          value={regPassword}
+                          onChange={(e) => setRegPassword(e.target.value)}
+                          className="w-full min-h-[42px] border border-slate-200 rounded-xl px-3 py-2 text-xs bg-slate-50 focus:bg-white"
+                        />
                       </div>
                     </div>
 
                     <button
-                      onClick={() => {
-                        showToast(authRole === 'dealer' ? 'Dealer application submitted! Set to pending administrator approval.' : 'Account registered successfully!');
-                        setCurrentScreen('login');
-                      }}
-                      className="mt-5 w-full py-2.5 bg-[#0A2540] text-white rounded-xl font-bold text-xs shadow-md"
+                      type="button"
+                      onClick={handleAuthRegisterSubmit}
+                      className="mt-4 w-full min-h-[44px] py-2.5 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-sm transition-colors cursor-pointer"
                     >
-                      Complete Registration
+                      {authRole === 'dealer' ? 'Submit Dealer Application' : 'Complete Registration'}
                     </button>
                   </div>
                 )}
@@ -2815,29 +3741,51 @@ class OrderDetailViewScreen extends StatelessWidget {
                   <div className="flex-1 flex flex-col bg-white p-6 justify-between text-xs">
                     <div>
                       <button
-                        onClick={() => setCurrentScreen('login')}
-                        className="flex items-center gap-1 text-slate-500 mb-4 hover:text-slate-800"
+                        type="button"
+                        onClick={() => {
+                          setAuthFormError(null);
+                          setCurrentScreen('login');
+                        }}
+                        className="flex items-center gap-1 min-h-[40px] text-slate-600 mb-4 hover:text-slate-900 cursor-pointer"
                       >
                         <ArrowLeft className="w-4 h-4" />
-                        <span>Back</span>
+                        <span>Back to Login</span>
                       </button>
                       <h2 className="text-lg font-black text-[#0A2540]">Reset Password</h2>
-                      <p className="text-slate-400 text-xs mt-1 mb-4">
-                        Enter your registered email address and we'll send you a password reset link.
+                      <p className="text-slate-500 text-xs mt-1 mb-4 leading-relaxed">
+                        Enter your registered email address to request a Firebase Authentication password reset link.
                       </p>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Email</label>
+                      {authFormError && (
+                        <div role="alert" className="mb-3 p-2.5 rounded-xl bg-red-50 border border-red-200 text-[11px] text-red-800">
+                          {authFormError}
+                        </div>
+                      )}
+                      <label htmlFor="reset-email-input" className="block text-[11px] font-bold text-slate-700 mb-1">
+                        Registered Email
+                      </label>
                       <input
+                        id="reset-email-input"
                         type="email"
-                        defaultValue="sarah.jenkins@example.com"
-                        className="w-full border border-slate-200 rounded-xl px-3 py-2 bg-slate-50 text-xs"
+                        value={resetEmail}
+                        onChange={(e) => {
+                          setResetEmail(e.target.value);
+                          if (authFormError) setAuthFormError(null);
+                        }}
+                        className="w-full min-h-[44px] border border-slate-200 rounded-xl px-3 py-2 bg-slate-50 focus:bg-white text-xs"
                       />
                     </div>
                     <button
+                      type="button"
                       onClick={() => {
-                        showToast('Password reset link sent to your email!');
+                        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resetEmail.trim())) {
+                          setAuthFormError('Please enter a valid registered email address.');
+                          return;
+                        }
+                        setAuthFormError(null);
+                        showToast(`Password reset instructions queued for ${resetEmail.trim()}.`);
                         setCurrentScreen('login');
                       }}
-                      className="w-full py-3 bg-[#0A2540] text-white rounded-xl font-bold text-xs"
+                      className="w-full min-h-[44px] py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs transition-colors cursor-pointer"
                     >
                       Send Reset Email
                     </button>
@@ -2848,84 +3796,146 @@ class OrderDetailViewScreen extends StatelessWidget {
                 {currentScreen === 'home' && (
                   <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
                     {/* Header */}
-                    <div className="bg-white px-4 py-2.5 border-b border-slate-100 shrink-0 flex items-center justify-between">
-                      <div>
-                        <p className="text-[10px] text-slate-400 font-semibold">Deliver to Mumbai 400050</p>
-                        <h2 className="text-sm font-extrabold text-[#0A2540]">Hello, Sarah 👋</h2>
-                      </div>
-                      <button onClick={() => setCurrentScreen('cart')} className="relative p-2 rounded-xl bg-slate-50 text-slate-700">
-                        <ShoppingCart className="w-4 h-4" />
-                        <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-teal-500 text-white text-[9px] font-black flex items-center justify-center">
-                          {cartCount}
-                        </span>
+                    <div className="bg-white px-4 py-2.5 border-b border-slate-100 shrink-0 flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReturnScreenAfterLocationSave('home');
+                          setCurrentScreen('delivery_location');
+                        }}
+                        className="text-left min-w-0 min-h-[44px] flex flex-col justify-center cursor-pointer"
+                      >
+                        <p className="text-[10px] text-teal-700 font-semibold truncate font-mono tabular-nums">
+                          Deliver to {defaultDeliveryAddress.city} {defaultDeliveryAddress.postalCode} ▾
+                        </p>
+                        <h2 className="text-sm font-extrabold text-[#0A2540] truncate">
+                          Hello, {profile.fullName.split(' ')[0]}
+                        </h2>
                       </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setCurrentScreen('notifications')}
+                          aria-label="Open Notifications"
+                          className="relative min-w-[44px] min-h-[44px] rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 flex items-center justify-center transition-colors cursor-pointer"
+                        >
+                          <Bell className="w-4 h-4" />
+                          {unreadNotificationCount > 0 && (
+                            <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 rounded-full bg-[#0A2540] text-white text-[9px] font-mono tabular-nums font-bold flex items-center justify-center">
+                              {unreadNotificationCount}
+                            </span>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCurrentScreen('cart')}
+                          aria-label="Open Shopping Cart"
+                          className="relative min-w-[44px] min-h-[44px] rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 flex items-center justify-center transition-colors cursor-pointer"
+                        >
+                          <ShoppingCart className="w-4 h-4" />
+                          {cartCount > 0 && (
+                            <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 rounded-full bg-teal-600 text-white text-[9px] font-mono tabular-nums font-bold flex items-center justify-center">
+                              {cartCount}
+                            </span>
+                          )}
+                        </button>
+                      </div>
                     </div>
 
                     {/* Scrollable Feed */}
                     <div className="flex-1 overflow-y-auto p-3.5 space-y-3 pb-16">
-                      {/* Search Bar */}
-                      <div
+                      {/* Search Entry */}
+                      <button
+                        type="button"
                         onClick={() => setCurrentScreen('catalog')}
-                        className="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-slate-200 text-slate-400 text-xs shadow-2xs cursor-pointer"
+                        className="w-full min-h-[44px] flex items-center gap-2 bg-white px-3.5 py-2 rounded-xl border border-slate-200 hover:border-slate-300 text-slate-500 text-xs transition-colors cursor-pointer text-left"
                       >
-                        <Search className="w-4 h-4 text-slate-400" />
-                        <span>Search purifiers, filters, pumps...</span>
-                      </div>
+                        <Search className="w-4 h-4 text-slate-400 shrink-0" />
+                        <span>Search RO purifiers, dispensers, filters, pumps...</span>
+                      </button>
 
-                      {/* Promo Banner */}
-                      <div className="bg-gradient-to-r from-[#0A2540] to-teal-800 text-white p-3.5 rounded-2xl shadow-sm">
-                        <span className="text-[9px] uppercase tracking-wider font-extrabold px-2 py-0.5 rounded bg-teal-500/30 text-teal-200">
-                          Califnco Care Promise
+                      {/* Brand Promise Banner */}
+                      <div className="bg-[#0A2540] text-white p-4 rounded-2xl border border-slate-800">
+                        <span className="text-[9.5px] uppercase tracking-wider font-bold text-teal-300">
+                          Califnco Certified Care
                         </span>
-                        <h3 className="text-sm font-black mt-1">Clean & Pure Living</h3>
-                        <p className="text-[10.5px] text-teal-100 mt-0.5 leading-snug">
-                          Free certified installation & 1-year RO membrane replacement warranty.
+                        <h3 className="text-sm font-black mt-1">8-Stage RO+UV+Copper Purification</h3>
+                        <p className="text-[11px] text-slate-200 mt-1 leading-relaxed">
+                          Includes certified doorstep installation and 1-year RO membrane warranty across India.
                         </p>
                       </div>
 
                       {/* Categories */}
                       <div className="flex gap-2 overflow-x-auto pb-1 text-[11px] no-scrollbar">
-                        {['Purifiers', 'Dispensers', 'Pumps', 'Filters', 'Spare Parts'].map((cat) => (
+                        {[
+                          { label: 'All', value: 'All' },
+                          { label: 'Purifiers', value: 'Water Purifiers' },
+                          { label: 'Dispensers', value: 'Dispensers' },
+                          { label: 'Pumps', value: 'Pumps' },
+                          { label: 'Filters', value: 'Filters' },
+                          { label: 'Spare Parts', value: 'Spare Parts' },
+                        ].map((cat) => (
                           <button
-                            key={cat}
-                            onClick={() => setCurrentScreen('catalog')}
-                            className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 font-semibold text-[#0A2540] whitespace-nowrap shadow-2xs"
+                            key={cat.value}
+                            type="button"
+                            onClick={() => {
+                              setCatalogCategory(cat.value);
+                              setCurrentScreen('catalog');
+                            }}
+                            className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-white border border-slate-200 hover:border-teal-600 font-semibold text-[#0A2540] whitespace-nowrap transition-colors cursor-pointer"
                           >
-                            {cat}
+                            {cat.label}
                           </button>
                         ))}
                       </div>
 
-                      {/* Featured Purifier */}
-                      <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-2xs">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-[10px] font-extrabold text-teal-600 uppercase tracking-wider">Featured Flagship</span>
-                          <span className="text-[10px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded font-bold">In Stock</span>
+                      {/* Featured Flagship Purifier */}
+                      <div className="bg-white p-3.5 rounded-2xl border border-slate-200">
+                        <div className="flex items-center justify-between mb-2.5">
+                          <span className="text-[10px] font-extrabold text-teal-700 uppercase tracking-wider">
+                            Featured Flagship
+                          </span>
+                          <span className="text-[10px] text-emerald-700 font-bold">
+                            In Stock ({WHOLESALE_CATALOG_PRODUCTS[0].stockQuantity})
+                          </span>
                         </div>
                         <div className="flex gap-3 items-center">
-                          <img src={IMG_PURIFIER} alt="purifier" className="w-20 h-20 rounded-xl object-cover bg-slate-100" />
-                          <div className="flex-1">
-                            <h4 className="font-extrabold text-xs text-[#0A2540] leading-tight">Hydra Pure Elite RO+UV+Copper</h4>
-                            <div className="flex items-center gap-1 text-[10px] text-amber-500 font-bold my-1">
-                              <Star className="w-3 h-3 fill-amber-400" />
-                              <span>4.9 (128 reviews)</span>
+                          <ProductStudioImage
+                            src={WHOLESALE_CATALOG_PRODUCTS[0].imageUrl}
+                            alt={WHOLESALE_CATALOG_PRODUCTS[0].name}
+                            className="w-20 h-20 rounded-xl"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <h4 className="font-extrabold text-xs text-[#0A2540] leading-snug">
+                              {WHOLESALE_CATALOG_PRODUCTS[0].name}
+                            </h4>
+                            <div className="flex items-center gap-1 text-[10.5px] text-amber-600 font-bold my-1 tabular-nums">
+                              <Star className="w-3 h-3 fill-amber-400 text-amber-500" />
+                              <span>
+                                {WHOLESALE_CATALOG_PRODUCTS[0].rating} ({WHOLESALE_CATALOG_PRODUCTS[0].reviewCount} reviews)
+                              </span>
                             </div>
-                            <span className="text-sm font-black text-[#0A2540]">₹17,499</span>
+                            <span className="text-sm font-black text-[#0A2540] font-mono tabular-nums">
+                              ₹{WHOLESALE_CATALOG_PRODUCTS[0].retailPrice.toLocaleString('en-IN')}
+                            </span>
                           </div>
                         </div>
                         <div className="flex gap-2 mt-3">
                           <button
-                            onClick={() => setCurrentScreen('details')}
-                            className="flex-1 py-1.5 bg-[#0A2540] text-white rounded-xl text-xs font-bold"
+                            type="button"
+                            onClick={() => {
+                              setSelectedRetailProduct(WHOLESALE_CATALOG_PRODUCTS[0]);
+                              setDetailQty(1);
+                              setCurrentScreen('details');
+                            }}
+                            className="flex-1 min-h-[42px] py-2 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
                           >
                             View Details
                           </button>
                           <button
-                            onClick={() => {
-                              setCartCount(cartCount + 1);
-                              showToast('Added Hydra Pure Elite to Cart!');
-                            }}
-                            className="px-3 py-1.5 bg-teal-50 text-teal-700 border border-teal-200 rounded-xl text-xs font-bold"
+                            type="button"
+                            onClick={() => addToRetailCart(WHOLESALE_CATALOG_PRODUCTS[0], 1)}
+                            className="min-h-[42px] px-4 py-2 bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-xl text-xs font-bold transition-colors cursor-pointer"
                           >
                             + Add
                           </button>
@@ -2939,36 +3949,63 @@ class OrderDetailViewScreen extends StatelessWidget {
                             Purifier Installation, Maintenance &amp; Repair
                           </h4>
                           <p className="text-[10.5px] text-slate-500 mt-0.5 leading-snug">
-                            Request a Califnco water specialist visit for your home unit.
+                            Submit a service request for technician scheduling.
                           </p>
                         </div>
                         <button
                           type="button"
                           onClick={() => setCurrentScreen('service_booking')}
-                          className="px-3 py-2 min-h-[40px] bg-[#0A2540] text-white rounded-xl text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer"
+                          className="px-3.5 py-2 min-h-[42px] bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl text-xs font-bold whitespace-nowrap shrink-0 transition-colors cursor-pointer"
                         >
                           Book Service
                         </button>
                       </div>
                     </div>
 
-                    {/* Bottom Nav */}
-                    <div className="h-14 bg-white border-t border-slate-200 px-4 flex items-center justify-between text-slate-500 shrink-0">
-                      <button onClick={() => setCurrentScreen('home')} className="flex flex-col items-center gap-0.5 text-[#0A2540] font-bold">
-                        <Home className="w-4 h-4" />
+                    {/* Unified 5-Tab Customer Bottom Nav */}
+                    <div className="h-14 bg-white border-t border-slate-200 px-3 flex items-center justify-between text-slate-500 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('home')}
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-[#0A2540] font-bold cursor-pointer"
+                      >
+                        <Home className="w-4 h-4 text-teal-700" />
                         <span className="text-[10px]">Home</span>
                       </button>
-                      <button onClick={() => setCurrentScreen('catalog')} className="flex flex-col items-center gap-0.5 text-slate-400">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('catalog')}
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
                         <Grid className="w-4 h-4" />
                         <span className="text-[10px]">Catalog</span>
                       </button>
-                      <button onClick={() => setCurrentScreen('cart')} className="flex flex-col items-center gap-0.5 text-slate-400">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('cart')}
+                        className="relative min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
                         <ShoppingCart className="w-4 h-4" />
                         <span className="text-[10px]">Cart</span>
+                        {cartCount > 0 && (
+                          <span className="absolute top-1 right-2 w-2 h-2 rounded-full bg-teal-600" />
+                        )}
                       </button>
-                      <button onClick={() => setCurrentScreen('order_history')} className="flex flex-col items-center gap-0.5 text-slate-400">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('order_history')}
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
                         <ShoppingBag className="w-4 h-4" />
                         <span className="text-[10px]">Orders</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('profile')}
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
+                        <User className="w-4 h-4" />
+                        <span className="text-[10px]">Profile</span>
                       </button>
                     </div>
                   </div>
@@ -2977,68 +4014,191 @@ class OrderDetailViewScreen extends StatelessWidget {
                 {/* ================= SCREEN 6: PRODUCT CATALOG SCREEN ================= */}
                 {currentScreen === 'catalog' && (
                   <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
-                    <div className="bg-white px-4 py-2.5 border-b border-slate-100 shrink-0 flex items-center justify-between">
-                      <h2 className="text-base font-extrabold text-[#0A2540]">Water Catalog</h2>
-                      <span className="text-xs text-teal-600 font-bold">50+ Products</span>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto p-3.5 space-y-3 pb-16">
-                      <div className="grid grid-cols-2 gap-2.5">
-                        <div
-                          onClick={() => setCurrentScreen('details')}
-                          className="bg-white p-2.5 rounded-xl border border-slate-200 cursor-pointer shadow-2xs"
-                        >
-                          <img src={IMG_PURIFIER} alt="purifier" className="w-full h-24 object-cover rounded-lg bg-slate-100 mb-2" />
-                          <h4 className="font-bold text-[11px] text-[#0A2540] line-clamp-1">Hydra Pure Elite RO</h4>
-                          <span className="text-xs font-black text-[#0A2540]">₹17,499</span>
+                    <div className="bg-white px-4 py-2.5 border-b border-slate-100 shrink-0 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <h2 className="text-base font-extrabold text-[#0A2540]">Water Catalog</h2>
+                        <div className="flex items-center gap-2">
+                          <select
+                            aria-label="Sort catalog products"
+                            value={retailSort}
+                            onChange={(e) =>
+                              setRetailSort(
+                                e.target.value as 'featured' | 'price_asc' | 'price_desc' | 'rating'
+                              )
+                            }
+                            className="min-h-[34px] text-[11px] font-semibold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 cursor-pointer"
+                          >
+                            <option value="featured">Sort: Featured</option>
+                            <option value="price_asc">Price: Low to High</option>
+                            <option value="price_desc">Price: High to Low</option>
+                            <option value="rating">Highest Rated</option>
+                          </select>
                         </div>
+                      </div>
 
-                        <div
-                          onClick={() => setCurrentScreen('details')}
-                          className="bg-white p-2.5 rounded-xl border border-slate-200 cursor-pointer shadow-2xs"
-                        >
-                          <img src={IMG_DISPENSER} alt="dispenser" className="w-full h-24 object-cover rounded-lg bg-slate-100 mb-2" />
-                          <h4 className="font-bold text-[11px] text-[#0A2540] line-clamp-1">Aquara Dispenser</h4>
-                          <span className="text-xs font-black text-[#0A2540]">₹12,499</span>
-                        </div>
+                      {/* Live Search Input */}
+                      <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 focus-within:border-teal-600 focus-within:bg-white rounded-xl px-3 min-h-[42px]">
+                        <Search className="w-4 h-4 text-slate-400 shrink-0" />
+                        <input
+                          type="search"
+                          value={retailSearch}
+                          onChange={(e) => setRetailSearch(e.target.value)}
+                          placeholder="Search RO, dispenser, pump, membrane..."
+                          className="w-full bg-transparent outline-none text-xs text-slate-900"
+                        />
+                        {retailSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setRetailSearch('')}
+                            aria-label="Clear search"
+                            className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
 
-                        <div
-                          onClick={() => setCurrentScreen('details')}
-                          className="bg-white p-2.5 rounded-xl border border-slate-200 cursor-pointer shadow-2xs"
-                        >
-                          <img src={IMG_FILTERS} alt="filters" className="w-full h-24 object-cover rounded-lg bg-slate-100 mb-2" />
-                          <h4 className="font-bold text-[11px] text-[#0A2540] line-clamp-1">3-in-1 Filter Kit</h4>
-                          <span className="text-xs font-black text-[#0A2540]">₹1,999</span>
-                        </div>
-
-                        <div
-                          onClick={() => setCurrentScreen('details')}
-                          className="bg-white p-2.5 rounded-xl border border-slate-200 cursor-pointer shadow-2xs"
-                        >
-                          <img src={IMG_PUMP} alt="pump" className="w-full h-24 object-cover rounded-lg bg-slate-100 mb-2" />
-                          <h4 className="font-bold text-[11px] text-[#0A2540] line-clamp-1">150 GPD Booster Pump</h4>
-                          <span className="text-xs font-black text-[#0A2540]">₹3,499</span>
-                        </div>
+                      {/* Category Filter Strip */}
+                      <div className="flex gap-1.5 overflow-x-auto pb-0.5 text-[11px] no-scrollbar">
+                        {['All', 'Water Purifiers', 'Dispensers', 'Pumps', 'Filters', 'Spare Parts'].map(
+                          (cat) => {
+                            const active = catalogCategory === cat;
+                            return (
+                              <button
+                                key={cat}
+                                type="button"
+                                onClick={() => setCatalogCategory(cat)}
+                                className={`min-h-[34px] px-3 py-1 rounded-lg font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                                  active
+                                    ? 'bg-[#0A2540] text-white'
+                                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                }`}
+                              >
+                                {cat === 'Water Purifiers' ? 'Purifiers' : cat}
+                              </button>
+                            );
+                          }
+                        )}
                       </div>
                     </div>
 
-                    {/* Bottom Nav */}
-                    <div className="h-14 bg-white border-t border-slate-200 px-4 flex items-center justify-between text-slate-500 shrink-0">
-                      <button onClick={() => setCurrentScreen('home')} className="flex flex-col items-center gap-0.5 text-slate-400">
+                    <div className="flex-1 overflow-y-auto p-3.5 pb-16">
+                      {filteredRetailProducts.length === 0 ? (
+                        <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center space-y-2 mt-4">
+                          <Search className="w-8 h-8 text-slate-300 mx-auto" />
+                          <h3 className="text-xs font-extrabold text-[#0A2540]">
+                            No Matching Water Systems
+                          </h3>
+                          <p className="text-[11px] text-slate-500">
+                            No products matched &ldquo;{retailSearch}&rdquo; in {catalogCategory}.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRetailSearch('');
+                              setCatalogCategory('All');
+                            }}
+                            className="mt-2 min-h-[40px] px-4 py-2 bg-[#0A2540] text-white rounded-xl text-xs font-bold cursor-pointer"
+                          >
+                            Reset Search &amp; Filters
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-2.5">
+                          {filteredRetailProducts.map((prod) => (
+                            <div
+                              key={prod.id}
+                              className="bg-white p-2.5 rounded-2xl border border-slate-200 hover:border-slate-300 transition-colors flex flex-col justify-between"
+                            >
+                              <div
+                                onClick={() => {
+                                  setSelectedRetailProduct(prod);
+                                  setDetailQty(1);
+                                  setCurrentScreen('details');
+                                }}
+                                className="cursor-pointer"
+                              >
+                                <ProductStudioImage
+                                  src={prod.imageUrl}
+                                  alt={prod.name}
+                                  className="w-full h-28 rounded-xl mb-2"
+                                />
+                                <div className="flex items-center justify-between text-[9.5px] text-slate-500 mb-0.5">
+                                  <span className="truncate font-semibold text-teal-700">
+                                    {prod.category}
+                                  </span>
+                                  <span className="font-bold text-amber-600 tabular-nums shrink-0">
+                                    ★ {prod.rating}
+                                  </span>
+                                </div>
+                                <h4 className="font-bold text-[11.5px] text-[#0A2540] line-clamp-2 leading-snug min-h-[30px]">
+                                  {prod.name}
+                                </h4>
+                              </div>
+
+                              <div className="pt-2 mt-1.5 border-t border-slate-100 flex items-center justify-between gap-1">
+                                <span className="text-xs font-black text-[#0A2540] font-mono tabular-nums">
+                                  ₹{prod.retailPrice.toLocaleString('en-IN')}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => addToRetailCart(prod, 1)}
+                                  aria-label={`Add ${prod.name} to cart`}
+                                  className="min-h-[36px] px-2.5 py-1 bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-lg text-[10.5px] font-bold transition-colors cursor-pointer"
+                                >
+                                  + Add
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Unified 5-Tab Customer Bottom Nav */}
+                    <div className="h-14 bg-white border-t border-slate-200 px-3 flex items-center justify-between text-slate-500 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('home')}
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
                         <Home className="w-4 h-4" />
                         <span className="text-[10px]">Home</span>
                       </button>
-                      <button onClick={() => setCurrentScreen('catalog')} className="flex flex-col items-center gap-0.5 text-[#0A2540] font-bold">
-                        <Grid className="w-4 h-4" />
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('catalog')}
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-[#0A2540] font-bold cursor-pointer"
+                      >
+                        <Grid className="w-4 h-4 text-teal-700" />
                         <span className="text-[10px]">Catalog</span>
                       </button>
-                      <button onClick={() => setCurrentScreen('cart')} className="flex flex-col items-center gap-0.5 text-slate-400">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('cart')}
+                        className="relative min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
                         <ShoppingCart className="w-4 h-4" />
                         <span className="text-[10px]">Cart</span>
+                        {cartCount > 0 && (
+                          <span className="absolute top-1 right-2 w-2 h-2 rounded-full bg-teal-600" />
+                        )}
                       </button>
-                      <button onClick={() => setCurrentScreen('order_history')} className="flex flex-col items-center gap-0.5 text-slate-400">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('order_history')}
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
                         <ShoppingBag className="w-4 h-4" />
                         <span className="text-[10px]">Orders</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('profile')}
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
+                        <User className="w-4 h-4" />
+                        <span className="text-[10px]">Profile</span>
                       </button>
                     </div>
                   </div>
@@ -3046,51 +4206,180 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                 {/* ================= SCREEN 7: PRODUCT DETAILS SCREEN ================= */}
                 {currentScreen === 'details' && (
-                  <div className="flex-1 flex flex-col bg-white overflow-hidden">
-                    <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between shrink-0">
-                      <button onClick={() => setCurrentScreen('catalog')} className="p-1 rounded-full text-slate-600 hover:bg-slate-100">
+                  <div className="flex-1 flex flex-col bg-white overflow-hidden relative">
+                    <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-between shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('catalog')}
+                        aria-label="Back to Catalog"
+                        className="min-w-[40px] min-h-[40px] rounded-xl text-slate-700 hover:bg-slate-100 flex items-center justify-center cursor-pointer"
+                      >
                         <ArrowLeft className="w-5 h-5 text-[#0A2540]" />
                       </button>
-                      <span className="font-extrabold text-xs text-[#0A2540]">Product Details</span>
-                      <button onClick={() => setCurrentScreen('cart')} className="p-1 text-slate-700">
+                      <span className="font-extrabold text-xs text-[#0A2540]">Product Specification</span>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('cart')}
+                        aria-label="Open Cart"
+                        className="relative min-w-[40px] min-h-[40px] rounded-xl text-slate-700 hover:bg-slate-100 flex items-center justify-center cursor-pointer"
+                      >
                         <ShoppingCart className="w-4 h-4" />
+                        {cartCount > 0 && (
+                          <span className="absolute top-1 right-1 min-w-[15px] h-[15px] px-1 rounded-full bg-teal-600 text-white text-[9px] font-mono tabular-nums font-bold flex items-center justify-center">
+                            {cartCount}
+                          </span>
+                        )}
                       </button>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-6">
-                      <div className="h-44 rounded-2xl bg-slate-50 border border-slate-100 overflow-hidden relative">
-                        <img src={IMG_PURIFIER} alt="purifier" className="w-full h-full object-cover" />
-                        <span className="absolute bottom-2 right-2 px-2 py-0.5 bg-black/60 text-white rounded text-[9px] font-bold">
-                          Pinch to Zoom
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3.5 pb-6">
+                      <button
+                        type="button"
+                        onClick={() => setIsProductZoomOpen(true)}
+                        className="w-full h-48 rounded-2xl bg-slate-100 border border-slate-200 overflow-hidden relative group cursor-pointer block"
+                        aria-label={`Zoom ${selectedRetailProduct.name} image`}
+                      >
+                        <ProductStudioImage
+                          src={selectedRetailProduct.imageUrl}
+                          alt={selectedRetailProduct.name}
+                          className="w-full h-full border-0 rounded-none"
+                        />
+                        <span className="absolute bottom-2.5 right-2.5 px-2.5 py-1 bg-slate-900/80 text-white rounded-lg text-[10px] font-semibold inline-flex items-center gap-1">
+                          <Maximize2 className="w-3 h-3" />
+                          <span>Tap to Inspect</span>
                         </span>
-                      </div>
+                      </button>
 
                       <div>
-                        <span className="text-[10px] text-teal-600 font-bold uppercase tracking-wider">Water Purifier</span>
-                        <h3 className="text-base font-extrabold text-[#0A2540] leading-snug">Califnco Hydra Pure Elite RO+UV+Copper</h3>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="text-lg font-black text-[#0A2540]">₹17,499</span>
-                          <span className="text-xs text-slate-400 line-through">₹22,999</span>
-                          <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">24% OFF</span>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] text-teal-700 font-extrabold uppercase tracking-wider">
+                            {selectedRetailProduct.category}
+                          </span>
+                          <span className="text-[10.5px] font-semibold text-emerald-700 tabular-nums">
+                            In Stock · {selectedRetailProduct.stockQuantity} units
+                          </span>
+                        </div>
+                        <h3 className="text-base font-extrabold text-[#0A2540] leading-snug mt-0.5">
+                          {selectedRetailProduct.name}
+                        </h3>
+                        <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed">
+                          {selectedRetailProduct.description}
+                        </p>
+
+                        <div className="flex items-baseline gap-2.5 mt-2.5 font-mono tabular-nums">
+                          <span className="text-lg font-black text-[#0A2540]">
+                            ₹{selectedRetailProduct.retailPrice.toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-xs text-slate-400 line-through">
+                            ₹{Math.round(selectedRetailProduct.retailPrice * 1.24).toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-[10px] font-sans font-bold text-emerald-700">
+                            Incl. 18% GST
+                          </span>
                         </div>
                       </div>
 
-                      <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs space-y-1.5">
-                        <div className="font-bold text-[#0A2540] text-[11px]">Technical Specifications</div>
-                        <div className="flex justify-between text-slate-500 text-[10.5px]"><span>Purification Capacity:</span><span className="font-semibold text-slate-800">10 Litres / hr</span></div>
-                        <div className="flex justify-between text-slate-500 text-[10.5px]"><span>Filter Stages:</span><span className="font-semibold text-slate-800">8 Stages (RO+UV+UF+Copper)</span></div>
-                        <div className="flex justify-between text-slate-500 text-[10.5px]"><span>TDS Reduction:</span><span className="font-semibold text-slate-800">Up to 2000 ppm</span></div>
+                      <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs space-y-1.5">
+                        <div className="font-bold text-[#0A2540] text-[11px]">
+                          Technical Specifications
+                        </div>
+                        {Object.entries(selectedRetailProduct.specifications).map(([key, val]) => (
+                          <div key={key} className="flex justify-between text-slate-600 text-[11px] capitalize">
+                            <span>{key.replace(/([A-Z])/g, ' $1')}:</span>
+                            <span className="font-semibold text-slate-900 tabular-nums">{String(val)}</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Quantity Selector */}
+                      <div className="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2">
+                        <span className="text-xs font-bold text-[#0A2540]">Order Quantity</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setDetailQty((q) => Math.max(1, q - 1))}
+                            disabled={detailQty <= 1}
+                            aria-label="Decrease quantity"
+                            className="w-9 h-9 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-slate-700 disabled:opacity-40 cursor-pointer"
+                          >
+                            <Minus className="w-3.5 h-3.5" />
+                          </button>
+                          <span className="w-7 text-center font-mono tabular-nums font-bold text-xs text-[#0A2540]">
+                            {detailQty}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDetailQty((q) =>
+                                Math.min(selectedRetailProduct.stockQuantity, q + 1)
+                              )
+                            }
+                            aria-label="Increase quantity"
+                            className="w-9 h-9 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-slate-700 cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     </div>
 
                     <div className="p-3 border-t border-slate-200 bg-white shrink-0 flex gap-2">
                       <button
-                        onClick={() => setCurrentScreen('cart')}
-                        className="flex-1 py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-md"
+                        type="button"
+                        onClick={() => addToRetailCart(selectedRetailProduct, detailQty)}
+                        className="flex-1 min-h-[44px] py-2.5 bg-teal-50 hover:bg-teal-100 text-teal-900 border border-teal-200 rounded-xl font-bold text-xs transition-colors cursor-pointer"
                       >
-                        Add to Cart & Checkout
+                        Add to Cart
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          addToRetailCart(selectedRetailProduct, detailQty);
+                          setCurrentScreen('cart');
+                        }}
+                        className="flex-1 min-h-[44px] py-2.5 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-sm transition-colors cursor-pointer"
+                      >
+                        Buy Now
                       </button>
                     </div>
+
+                    {/* Studio Lightbox Zoom Modal */}
+                    {isProductZoomOpen && (
+                      <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label={`${selectedRetailProduct.name} studio zoom`}
+                        onClick={() => setIsProductZoomOpen(false)}
+                        className="absolute inset-0 z-40 bg-slate-950/85 p-4 flex flex-col justify-between"
+                      >
+                        <div className="flex items-center justify-between text-white">
+                          <span className="text-xs font-bold truncate pr-2">
+                            {selectedRetailProduct.name}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setIsProductZoomOpen(false)}
+                            aria-label="Close zoom preview"
+                            className="min-w-[40px] min-h-[40px] rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center cursor-pointer"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="my-auto rounded-2xl overflow-hidden bg-white p-2 shadow-2xl"
+                        >
+                          <img
+                            src={selectedRetailProduct.imageUrl}
+                            alt={selectedRetailProduct.name}
+                            className="w-full h-72 object-contain rounded-xl bg-slate-50"
+                          />
+                        </div>
+                        <p className="text-center text-[11px] text-slate-300">
+                          Tap outside or press Esc to close studio view
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -3098,46 +4387,154 @@ class OrderDetailViewScreen extends StatelessWidget {
                 {currentScreen === 'cart' && (
                   <div className="flex-1 flex flex-col bg-slate-50 overflow-hidden">
                     <div className="bg-white px-4 py-2.5 border-b border-slate-100 flex items-center justify-between shrink-0">
-                      <h2 className="text-base font-extrabold text-[#0A2540]">Shopping Cart</h2>
-                      <span className="text-xs font-bold text-teal-600">2 Items</span>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto p-3.5 space-y-2.5 pb-6">
-                      <div className="bg-white p-3 rounded-2xl border border-slate-200 flex gap-3 items-center">
-                        <img src={IMG_PURIFIER} alt="purifier" className="w-14 h-14 rounded-xl object-cover bg-slate-100" />
-                        <div className="flex-1 min-w-0">
-                          <h4 className="font-bold text-xs text-[#0A2540] truncate">Hydra Pure Elite RO</h4>
-                          <span className="text-xs font-black text-[#0A2540]">₹17,499</span>
-                        </div>
-                        <span className="text-xs font-bold text-slate-600">Qty: 1</span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setCurrentScreen('catalog')}
+                          aria-label="Back to Catalog"
+                          className="min-w-[38px] min-h-[38px] rounded-lg hover:bg-slate-100 flex items-center justify-center cursor-pointer"
+                        >
+                          <ArrowLeft className="w-4 h-4 text-[#0A2540]" />
+                        </button>
+                        <h2 className="text-base font-extrabold text-[#0A2540]">Shopping Cart</h2>
                       </div>
-
-                      <div className="bg-white p-3 rounded-2xl border border-slate-200 flex gap-3 items-center">
-                        <img src={IMG_FILTERS} alt="filters" className="w-14 h-14 rounded-xl object-cover bg-slate-100" />
-                        <div className="flex-1 min-w-0">
-                          <h4 className="font-bold text-xs text-[#0A2540] truncate">3-in-1 Replacement Kit</h4>
-                          <span className="text-xs font-black text-[#0A2540]">₹1,999 × 2</span>
-                        </div>
-                        <span className="text-xs font-bold text-slate-600">Qty: 2</span>
-                      </div>
-
-                      <div className="bg-white p-3.5 rounded-2xl border border-slate-200 text-xs space-y-1 mt-4">
-                        <div className="flex justify-between text-slate-500"><span>Subtotal:</span><span>₹21,497</span></div>
-                        <div className="flex justify-between text-emerald-600 font-bold"><span>Delivery:</span><span>FREE</span></div>
-                        <div className="flex justify-between font-black text-sm text-[#0A2540] pt-2 border-t border-slate-100">
-                          <span>Total Payable:</span><span>₹21,497</span>
-                        </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-teal-700 font-mono tabular-nums">
+                          {cartCount} {cartCount === 1 ? 'Unit' : 'Units'}
+                        </span>
+                        {retailCart.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setRetailCart([])}
+                            className="text-[11px] font-semibold text-slate-500 hover:text-red-600 px-1.5 py-1 cursor-pointer"
+                          >
+                            Clear
+                          </button>
+                        )}
                       </div>
                     </div>
 
-                    <div className="p-3 bg-white border-t border-slate-200 shrink-0">
-                      <button
-                        onClick={() => setCurrentScreen('checkout')}
-                        className="w-full py-3 bg-[#0A2540] text-white rounded-xl font-bold text-xs shadow-md"
-                      >
-                        Proceed to Checkout (₹21,497)
-                      </button>
-                    </div>
+                    {retailCart.length === 0 ? (
+                      <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                        <div className="w-14 h-14 rounded-2xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-400 mb-3">
+                          <ShoppingCart className="w-6 h-6" />
+                        </div>
+                        <h3 className="text-sm font-extrabold text-[#0A2540]">Your Cart is Empty</h3>
+                        <p className="text-xs text-slate-500 mt-1 max-w-[230px] leading-relaxed">
+                          Add Califnco RO purifiers, dispensers, or replacement filter kits to calculate checkout totals.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setCurrentScreen('catalog')}
+                          className="mt-4 min-h-[44px] px-5 py-2.5 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                        >
+                          Browse Water Catalog
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex-1 overflow-y-auto p-3.5 space-y-2.5 pb-6">
+                          {retailCart.map((entry) => (
+                            <div
+                              key={entry.product.id}
+                              className="bg-white p-3 rounded-2xl border border-slate-200 space-y-2.5"
+                            >
+                              <div className="flex gap-3 items-start">
+                                <ProductStudioImage
+                                  src={entry.product.imageUrl}
+                                  alt={entry.product.name}
+                                  className="w-14 h-14 rounded-xl"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <h4 className="font-bold text-xs text-[#0A2540] leading-snug line-clamp-2">
+                                    {entry.product.name}
+                                  </h4>
+                                  <span className="text-[11px] text-slate-500 font-mono tabular-nums">
+                                    ₹{entry.product.retailPrice.toLocaleString('en-IN')} / unit
+                                  </span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => removeFromRetailCart(entry.product.id)}
+                                  aria-label={`Remove ${entry.product.name}`}
+                                  className="min-w-[36px] min-h-[36px] rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 flex items-center justify-center transition-colors cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+
+                              <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => updateRetailCartQty(entry.product.id, -1)}
+                                    aria-label="Decrease item quantity"
+                                    className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-700 cursor-pointer"
+                                  >
+                                    <Minus className="w-3 h-3" />
+                                  </button>
+                                  <span className="w-7 text-center font-mono tabular-nums font-bold text-xs text-[#0A2540]">
+                                    {entry.quantity}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => updateRetailCartQty(entry.product.id, 1)}
+                                    aria-label="Increase item quantity"
+                                    className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-700 cursor-pointer"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                  </button>
+                                </div>
+                                <span className="text-xs font-black text-[#0A2540] font-mono tabular-nums">
+                                  ₹{(entry.product.retailPrice * entry.quantity).toLocaleString('en-IN')}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+
+                          <div className="bg-white p-3.5 rounded-2xl border border-slate-200 text-xs space-y-1.5 mt-2">
+                            <div className="flex justify-between text-slate-600">
+                              <span>Subtotal ({cartCount} units)</span>
+                              <span className="font-mono tabular-nums font-semibold text-slate-900">
+                                ₹{retailSubtotal.toLocaleString('en-IN')}
+                              </span>
+                            </div>
+                            <div className="flex justify-between text-slate-600">
+                              <span>Delivery &amp; Standard Handling</span>
+                              <span
+                                className={`font-mono tabular-nums font-bold ${
+                                  retailDeliveryFee === 0 ? 'text-emerald-700' : 'text-slate-900'
+                                }`}
+                              >
+                                {retailDeliveryFee === 0 ? 'FREE' : `₹${retailDeliveryFee}`}
+                              </span>
+                            </div>
+                            <div className="flex justify-between text-[11px] text-slate-500">
+                              <span>Included GST (18%)</span>
+                              <span className="font-mono tabular-nums">
+                                ₹{retailIncludedGst.toLocaleString('en-IN')}
+                              </span>
+                            </div>
+                            <div className="flex justify-between font-black text-sm text-[#0A2540] pt-2 border-t border-slate-100">
+                              <span>Total Payable</span>
+                              <span className="font-mono tabular-nums">
+                                ₹{retailGrandTotal.toLocaleString('en-IN')}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="p-3 bg-white border-t border-slate-200 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => setCurrentScreen('checkout')}
+                            className="w-full min-h-[44px] py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-sm transition-colors cursor-pointer font-sans"
+                          >
+                            Proceed to Checkout (₹{retailGrandTotal.toLocaleString('en-IN')})
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -3145,61 +4542,133 @@ class OrderDetailViewScreen extends StatelessWidget {
                 {currentScreen === 'checkout' && (
                   <div className="flex-1 flex flex-col bg-slate-50 overflow-hidden">
                     <div className="bg-white px-4 py-2.5 border-b border-slate-100 flex items-center justify-between shrink-0">
-                      <button onClick={() => setCurrentScreen('cart')} className="p-1 rounded-full text-slate-600 hover:bg-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('cart')}
+                        aria-label="Back to Cart"
+                        className="min-w-[40px] min-h-[40px] rounded-xl text-slate-600 hover:bg-slate-100 flex items-center justify-center cursor-pointer"
+                      >
                         <ArrowLeft className="w-5 h-5 text-[#0A2540]" />
                       </button>
                       <h2 className="text-base font-extrabold text-[#0A2540]">Checkout</h2>
-                      <div className="w-5" />
+                      <div className="w-8" />
                     </div>
 
                     <div className="flex-1 overflow-y-auto p-3.5 space-y-3 pb-6">
+                      {/* Destination Address */}
                       <div className="bg-white p-3.5 rounded-2xl border border-slate-200 text-xs space-y-1">
-                        <div className="font-bold text-[#0A2540]">Delivery Address</div>
-                        <p className="text-slate-700 font-semibold">Sarah Jenkins • +91 98765 43210</p>
-                        <p className="text-slate-500 text-[11px]">Flat 402, Green Park Avenue, Link Road, Mumbai, 400050</p>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="font-bold text-[#0A2540]">Delivery Address</div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReturnScreenAfterLocationSave('checkout');
+                              setCurrentScreen('delivery_location');
+                            }}
+                            className="min-h-[34px] px-2 text-[11px] font-bold text-teal-700 hover:text-teal-900 underline cursor-pointer"
+                          >
+                            Change Location
+                          </button>
+                        </div>
+                        <p className="text-slate-800 font-semibold">
+                          {defaultDeliveryAddress.recipientName} ·{' '}
+                          <span className="font-mono tabular-nums">{defaultDeliveryAddress.phone}</span>
+                        </p>
+                        <p className="text-slate-500 text-[11px] leading-relaxed">
+                          {defaultDeliveryAddress.streetAddress}, {defaultDeliveryAddress.city},{' '}
+                          <span className="font-mono tabular-nums">{defaultDeliveryAddress.postalCode}</span>
+                        </p>
                       </div>
 
+                      {/* Order Summary */}
+                      <div className="bg-white p-3.5 rounded-2xl border border-slate-200 text-xs space-y-1.5">
+                        <div className="font-bold text-[#0A2540]">Order Summary ({cartCount} units)</div>
+                        {retailCart.map((c) => (
+                          <div key={c.product.id} className="flex justify-between text-[11px] text-slate-600 gap-2">
+                            <span className="truncate">
+                              {c.quantity}× {c.product.name}
+                            </span>
+                            <span className="font-mono tabular-nums font-semibold text-slate-900 shrink-0">
+                              ₹{(c.product.retailPrice * c.quantity).toLocaleString('en-IN')}
+                            </span>
+                          </div>
+                        ))}
+                        <div className="pt-2 border-t border-slate-100 flex justify-between font-extrabold text-[#0A2540]">
+                          <span>Total Payable</span>
+                          <span className="font-mono tabular-nums">
+                            ₹{retailGrandTotal.toLocaleString('en-IN')}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Payment Method */}
                       <div className="bg-white p-3.5 rounded-2xl border border-slate-200 text-xs space-y-2">
                         <div className="font-bold text-[#0A2540]">Payment Method</div>
+
                         <button
-                          onClick={() => setPaymentChoice('razorpay')}
-                          className={`w-full p-2.5 rounded-xl border text-left flex items-center justify-between ${
-                            paymentChoice === 'razorpay' ? 'border-teal-500 bg-teal-50/50' : 'border-slate-200'
+                          type="button"
+                          onClick={() => setPaymentChoice('cod')}
+                          className={`w-full min-h-[52px] p-3 rounded-xl border text-left flex items-center justify-between transition-colors cursor-pointer ${
+                            paymentChoice === 'cod'
+                              ? 'border-teal-600 bg-teal-50/50'
+                              : 'border-slate-200 hover:border-slate-300'
                           }`}
                         >
-                          <div className="flex items-center gap-2">
-                            <CreditCard className="w-4 h-4 text-teal-600" />
+                          <div className="flex items-center gap-2.5">
+                            <Banknote className="w-4 h-4 text-teal-700 shrink-0" />
                             <div>
-                              <div className="font-bold text-[#0A2540]">Razorpay (Test Mode)</div>
-                              <div className="text-[10px] text-slate-400">Cards, UPI, Netbanking (Key ID: rzp_test_*)</div>
+                              <div className="font-bold text-[#0A2540]">Cash on Delivery (COD)</div>
+                              <div className="text-[10.5px] text-slate-500">
+                                Pay upon doorstep delivery · Saves live to Firestore when signed in
+                              </div>
                             </div>
                           </div>
-                          <span className="text-[10px] font-bold text-teal-600 bg-teal-100 px-1.5 py-0.5 rounded">TEST</span>
                         </button>
 
                         <button
-                          onClick={() => setPaymentChoice('cod')}
-                          className={`w-full p-2.5 rounded-xl border text-left flex items-center justify-between ${
-                            paymentChoice === 'cod' ? 'border-teal-500 bg-teal-50/50' : 'border-slate-200'
+                          type="button"
+                          onClick={() => setPaymentChoice('razorpay')}
+                          className={`w-full min-h-[52px] p-3 rounded-xl border text-left flex items-center justify-between transition-colors cursor-pointer ${
+                            paymentChoice === 'razorpay'
+                              ? 'border-teal-600 bg-teal-50/50'
+                              : 'border-slate-200 hover:border-slate-300'
                           }`}
                         >
-                          <div className="flex items-center gap-2">
-                            <Banknote className="w-4 h-4 text-slate-600" />
+                          <div className="flex items-center gap-2.5">
+                            <CreditCard className="w-4 h-4 text-slate-700 shrink-0" />
                             <div>
-                              <div className="font-bold text-[#0A2540]">Cash on Delivery (COD)</div>
-                              <div className="text-[10px] text-slate-400">Pay when certified technician installs</div>
+                              <div className="font-bold text-[#0A2540]">Razorpay (Client Test Mode)</div>
+                              <div className="text-[10.5px] text-slate-500">
+                                UI simulation only · Requires server HMAC webhook for live capture
+                              </div>
                             </div>
                           </div>
+                          <span className="text-[9.5px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded shrink-0">
+                            UNVERIFIED
+                          </span>
                         </button>
+
+                        {paymentChoice === 'razorpay' && (
+                          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[10.5px] text-amber-950 leading-relaxed">
+                            <strong>Payment Verification Notice:</strong> No server-side{' '}
+                            <code>RAZORPAY_KEY_SECRET</code> webhook is configured in this preview. Orders placed in test mode are recorded as <strong>Payment Unverified</strong>.
+                          </div>
+                        )}
                       </div>
                     </div>
 
                     <div className="p-3 bg-white border-t border-slate-200 shrink-0">
                       <button
-                        onClick={() => setCurrentScreen('order_confirmation')}
-                        className="w-full py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-md"
+                        type="button"
+                        disabled={isPlacingRetailOrder || retailCart.length === 0}
+                        onClick={handlePlaceRetailOrder}
+                        className="w-full min-h-[44px] py-3 bg-[#0A2540] hover:bg-[#061B2E] disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-sm transition-colors cursor-pointer"
                       >
-                        Place Order & Pay ₹21,497
+                        {isPlacingRetailOrder
+                          ? 'Submitting Order...'
+                          : paymentChoice === 'cod'
+                          ? `Place COD Order (₹${retailGrandTotal.toLocaleString('en-IN')})`
+                          : `Record Test Order (₹${retailGrandTotal.toLocaleString('en-IN')})`}
                       </button>
                     </div>
                   </div>
@@ -3207,37 +4676,81 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                 {/* ================= SCREEN 10: ORDER CONFIRMATION SCREEN ================= */}
                 {currentScreen === 'order_confirmation' && (
-                  <div className="flex-1 flex flex-col bg-white overflow-hidden p-6 text-center justify-between">
-                    <div className="pt-4 flex flex-col items-center">
-                      <div className="w-16 h-16 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 mb-3 shadow-xs">
-                        <CheckCircle2 className="w-9 h-9" />
-                      </div>
-                      <span className="text-[10px] font-extrabold uppercase tracking-widest text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">
-                        Payment Verified
-                      </span>
-                      <h2 className="text-xl font-black text-[#0A2540] mt-2">Order Confirmed!</h2>
-                      <p className="text-xs text-slate-400 mt-0.5">Order Ref: <strong>#CALIF-82941</strong></p>
-                    </div>
-
-                    <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 text-xs text-left space-y-1.5 my-auto">
-                      <div className="flex justify-between text-slate-500 text-[11px]"><span>Paid Amount:</span><span className="font-bold text-[#0A2540]">₹21,497</span></div>
-                      <div className="flex justify-between text-slate-500 text-[11px]"><span>Payment Mode:</span><span className="font-bold text-teal-600">Razorpay (rzp_test_*)</span></div>
-                      <div className="flex justify-between text-slate-500 text-[11px]"><span>Delivery & Setup:</span><span className="font-bold text-slate-700">Mumbai 400050</span></div>
-                      <div className="text-[10.5px] text-teal-700 font-semibold pt-1 border-t border-slate-200">
-                        Estimated Delivery: Tuesday, Oct 28 with certified installation
-                      </div>
-                    </div>
-
-                    <div className="space-y-2 pb-2">
-                      <button
-                        onClick={() => setCurrentScreen('order_detail_view')}
-                        className="w-full py-3 bg-[#0A2540] text-white rounded-xl font-bold text-xs shadow-md"
+                  <div className="flex-1 flex flex-col bg-white overflow-y-auto p-6 text-center justify-between">
+                    <div className="pt-2 flex flex-col items-center">
+                      <div
+                        className={`w-14 h-14 rounded-2xl border flex items-center justify-center mb-3 ${
+                          selectedOrder.paymentStatus === 'verified'
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-600'
+                            : 'bg-amber-50 border-amber-200 text-amber-700'
+                        }`}
                       >
-                        View Order Details & Tracking
+                        <CheckCircle2 className="w-8 h-8" />
+                      </div>
+                      <span
+                        className={`text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-0.5 rounded ${
+                          selectedOrder.paymentStatus === 'verified'
+                            ? 'text-emerald-800 bg-emerald-50 border border-emerald-200'
+                            : 'text-amber-900 bg-amber-50 border border-amber-200'
+                        }`}
+                      >
+                        {selectedOrder.paymentStatus === 'verified'
+                          ? 'Payment Verified'
+                          : selectedOrder.paymentMethod === 'cod'
+                          ? 'COD — Payment Due on Delivery'
+                          : 'Test Checkout — Payment Unverified'}
+                      </span>
+                      <h2 className="text-xl font-black text-[#0A2540] mt-2">
+                        Order Request Recorded
+                      </h2>
+                      <p className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
+                        Order Ref: <strong>#{selectedOrder.orderNumber}</strong>
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 text-xs text-left space-y-2 my-4">
+                      <div className="flex justify-between text-slate-600 text-[11px]">
+                        <span>Order Total:</span>
+                        <span className="font-bold text-[#0A2540] font-mono tabular-nums">
+                          ₹{selectedOrder.totalAmount.toLocaleString('en-IN')}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-slate-600 text-[11px]">
+                        <span>Payment Status:</span>
+                        <span className="font-bold text-slate-900">
+                          {selectedOrder.paymentStatus === 'verified'
+                            ? 'Settled & Verified'
+                            : selectedOrder.paymentMethod === 'cod'
+                            ? 'Uncollected (Cash on Delivery)'
+                            : 'Pending Server Gateway Verification'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-slate-600 text-[11px]">
+                        <span>Destination:</span>
+                        <span className="font-bold text-slate-800 font-mono tabular-nums">
+                          {selectedOrder.deliveryAddress.city} {selectedOrder.deliveryAddress.pincode}
+                        </span>
+                      </div>
+                      <div className="text-[10.5px] text-slate-600 pt-2 border-t border-slate-200 leading-relaxed">
+                        {selectedOrder.paymentMethod === 'razorpay' &&
+                        selectedOrder.paymentStatus !== 'verified'
+                          ? 'Note: Client-side Razorpay test mode does not verify payment capture. Configure a backend Razorpay Order + HMAC-SHA256 webhook before fulfilling paid orders.'
+                          : selectedOrder.estimatedDelivery}
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 pb-1">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('order_detail_view')}
+                        className="w-full min-h-[44px] py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-sm transition-colors cursor-pointer"
+                      >
+                        View Order Details &amp; Tracking
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('order_history')}
-                        className="w-full py-2.5 bg-slate-100 text-[#0A2540] rounded-xl font-semibold text-xs"
+                        className="w-full min-h-[44px] py-2.5 bg-slate-100 hover:bg-slate-200 text-[#0A2540] rounded-xl font-semibold text-xs transition-colors cursor-pointer"
                       >
                         Go to Order History
                       </button>
@@ -3247,28 +4760,31 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                 {/* ================= SCREEN 11: ORDER HISTORY SCREEN ================= */}
                 {currentScreen === 'order_history' && (
-                  <div className="flex-1 flex flex-col overflow-hidden">
+                  <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
                     {/* Top Bar */}
                     <div className="bg-white px-4 py-2.5 flex items-center justify-between border-b border-slate-100 shrink-0">
                       <h2 className="text-base font-extrabold text-[#0A2540]">Order History</h2>
-                      <span className="text-xs font-bold text-teal-600">{orders.length} Orders</span>
+                      <span className="text-xs font-bold text-teal-700 font-mono tabular-nums">
+                        {orders.length} Orders
+                      </span>
                     </div>
 
                     {/* Orders List */}
                     {isOrdersLoading ? (
                       <div className="flex-1 flex items-center justify-center">
-                        <RefreshCw className="w-6 h-6 animate-spin text-teal-500" />
+                        <RefreshCw className="w-6 h-6 animate-spin text-teal-600" />
                       </div>
                     ) : orders.length === 0 ? (
                       <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
                         <ShoppingBag className="w-12 h-12 text-slate-300 mb-2" />
                         <h3 className="font-bold text-sm text-slate-700">No Orders Placed Yet</h3>
-                        <p className="text-xs text-slate-400 mt-1 max-w-xs">
-                          You haven't purchased any water purifiers or filter cartridges.
+                        <p className="text-xs text-slate-500 mt-1 max-w-xs">
+                          You haven&apos;t purchased any water purifiers or filter cartridges yet.
                         </p>
                         <button
+                          type="button"
                           onClick={() => setCurrentScreen('catalog')}
-                          className="mt-3 px-4 py-2 bg-[#0A2540] text-white rounded-xl text-xs font-semibold"
+                          className="mt-3 min-h-[44px] px-4 py-2 bg-[#0A2540] text-white rounded-xl text-xs font-semibold cursor-pointer"
                         >
                           Explore Catalog
                         </button>
@@ -3278,60 +4794,79 @@ class OrderDetailViewScreen extends StatelessWidget {
                         {orders.map((ord) => (
                           <div
                             key={ord.id}
-                            className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs hover:border-slate-300 transition-all"
+                            className="bg-white p-3.5 rounded-2xl border border-slate-200 hover:border-slate-300 transition-colors"
                           >
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="font-extrabold text-xs text-[#0A2540]">#{ord.orderNumber}</span>
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="font-extrabold text-xs text-[#0A2540] font-mono tabular-nums">
+                                #{ord.orderNumber}
+                              </span>
                               <span
                                 className={`px-2 py-0.5 rounded text-[9.5px] font-extrabold uppercase ${
                                   ord.orderStatus === 'delivered'
                                     ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                    : 'bg-teal-50 text-teal-700 border border-teal-200'
+                                    : 'bg-teal-50 text-teal-800 border border-teal-200'
                                 }`}
                               >
                                 {ord.orderStatus}
                               </span>
                             </div>
 
-                            <p className="text-[11px] text-slate-400">{ord.createdAt}</p>
+                            <p className="text-[11px] text-slate-500">{ord.createdAt}</p>
 
                             <div className="my-2 py-2 border-y border-slate-100 text-xs">
-                              <div className="flex items-center gap-2">
-                                <img
+                              <div className="flex items-center gap-2.5">
+                                <ProductStudioImage
                                   src={ord.items[0]?.imageUrl || IMG_PURIFIER}
-                                  alt="item"
-                                  className="w-10 h-10 rounded-lg object-cover bg-slate-100"
+                                  alt={ord.items[0]?.productName || 'Order item'}
+                                  className="w-11 h-11 rounded-lg"
                                 />
                                 <div className="flex-1 min-w-0">
                                   <h4 className="font-bold text-[#0A2540] truncate">
                                     {ord.items[0]?.productName}
                                   </h4>
-                                  <p className="text-[10px] text-slate-500">
+                                  <p className="text-[10.5px] text-slate-500 tabular-nums">
                                     {ord.items.length > 1
                                       ? `+${ord.items.length - 1} other item(s)`
                                       : `Qty: ${ord.items[0]?.quantity}`}
                                   </p>
                                 </div>
                                 <div className="text-right">
-                                  <span className="font-black text-[#0A2540]">
-                                    ₹{ord.totalAmount.toLocaleString()}
+                                  <span className="font-black text-[#0A2540] font-mono tabular-nums">
+                                    ₹{ord.totalAmount.toLocaleString('en-IN')}
                                   </span>
                                 </div>
                               </div>
                             </div>
 
-                            <div className="flex items-center justify-between pt-1">
-                              <span className="text-[10px] text-emerald-700 font-semibold flex items-center gap-1">
-                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                <span>{ord.paymentMethod === 'razorpay' ? 'Paid via Razorpay' : 'COD'}</span>
+                            <div className="flex items-center justify-between pt-1 gap-2">
+                              <span
+                                className={`text-[10.5px] font-semibold flex items-center gap-1 ${
+                                  ord.paymentStatus === 'verified'
+                                    ? 'text-emerald-700'
+                                    : 'text-amber-800'
+                                }`}
+                              >
+                                {ord.paymentStatus === 'verified' ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                ) : (
+                                  <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                )}
+                                <span>
+                                  {ord.paymentStatus === 'verified'
+                                    ? 'Paid (Verified)'
+                                    : ord.paymentMethod === 'cod'
+                                    ? 'COD Pending'
+                                    : 'Gateway Unverified'}
+                                </span>
                               </span>
 
                               <button
+                                type="button"
                                 onClick={() => {
                                   setSelectedOrder(ord);
                                   setCurrentScreen('order_detail_view');
                                 }}
-                                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-[#0A2540] rounded-lg text-xs font-bold flex items-center gap-1 transition-colors"
+                                className="min-h-[38px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-[#0A2540] rounded-lg text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer"
                               >
                                 <span>View Details</span>
                                 <ChevronRight className="w-3.5 h-3.5" />
@@ -3342,39 +4877,47 @@ class OrderDetailViewScreen extends StatelessWidget {
                       </div>
                     )}
 
-                    {/* Bottom Navigation */}
-                    <div className="h-14 bg-white border-t border-slate-200 px-4 flex items-center justify-between text-slate-500 shrink-0">
+                    {/* Unified 5-Tab Customer Bottom Navigation */}
+                    <div className="h-14 bg-white border-t border-slate-200 px-3 flex items-center justify-between text-slate-500 shrink-0">
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('home')}
-                        className="flex flex-col items-center gap-0.5 text-slate-400 hover:text-slate-600"
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
                       >
                         <Home className="w-4 h-4" />
                         <span className="text-[10px]">Home</span>
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('catalog')}
-                        className="flex flex-col items-center gap-0.5 text-slate-400 hover:text-slate-600"
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
                       >
                         <Grid className="w-4 h-4" />
                         <span className="text-[10px]">Catalog</span>
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('cart')}
-                        className="flex flex-col items-center gap-0.5 text-slate-400 hover:text-slate-600"
+                        className="relative min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
                       >
                         <ShoppingCart className="w-4 h-4" />
                         <span className="text-[10px]">Cart</span>
+                        {cartCount > 0 && (
+                          <span className="absolute top-1 right-2 w-2 h-2 rounded-full bg-teal-600" />
+                        )}
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('order_history')}
-                        className="flex flex-col items-center gap-0.5 text-[#0A2540] font-bold"
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-[#0A2540] font-bold cursor-pointer"
                       >
-                        <ShoppingBag className="w-4 h-4" />
+                        <ShoppingBag className="w-4 h-4 text-teal-700" />
                         <span className="text-[10px]">Orders</span>
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('profile')}
-                        className="flex flex-col items-center gap-0.5 text-slate-400 hover:text-slate-600"
+                        className="min-w-[52px] min-h-[44px] flex flex-col items-center justify-center gap-0.5 text-slate-500 hover:text-slate-800 cursor-pointer"
                       >
                         <User className="w-4 h-4" />
                         <span className="text-[10px]">Profile</span>
@@ -3385,41 +4928,59 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                 {/* ================= SCREEN 12: ORDER DETAIL VIEW SCREEN ================= */}
                 {currentScreen === 'order_detail_view' && selectedOrder && (
-                  <div className="flex-1 flex flex-col overflow-hidden">
+                  <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
                     {/* Top Bar */}
                     <div className="bg-white px-4 py-2.5 flex items-center justify-between border-b border-slate-100 shrink-0">
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('order_history')}
-                        className="p-1 rounded-full text-slate-600 hover:bg-slate-100"
+                        aria-label="Back to Order History"
+                        className="min-w-[40px] min-h-[40px] rounded-xl text-slate-600 hover:bg-slate-100 flex items-center justify-center cursor-pointer"
                       >
                         <ArrowLeft className="w-5 h-5 text-[#0A2540]" />
                       </button>
-                      <h2 className="text-base font-extrabold text-[#0A2540]">
+                      <h2 className="text-sm font-extrabold text-[#0A2540] font-mono tabular-nums">
                         #{selectedOrder.orderNumber}
                       </h2>
-                      <div className="w-5" />
+                      <div className="w-8" />
                     </div>
 
                     {/* Scrollable Order Inspection */}
                     <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-8">
-                      {/* Fulfilment Status Card */}
-                      <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-1.5 shadow-xs">
+                      {/* Fulfilment & Payment Verification Card */}
+                      <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-2">
                         <div className="flex justify-between items-center text-xs">
-                          <span className="text-slate-500">Order Status</span>
+                          <span className="text-slate-500">Fulfilment Status</span>
                           <span className="font-extrabold uppercase text-[#0A2540]">
                             {selectedOrder.orderStatus}
                           </span>
                         </div>
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-slate-500">Payment Verification</span>
+                          <span
+                            className={`font-bold ${
+                              selectedOrder.paymentStatus === 'verified'
+                                ? 'text-emerald-700'
+                                : 'text-amber-800'
+                            }`}
+                          >
+                            {selectedOrder.paymentStatus === 'verified'
+                              ? 'Verified (Razorpay)'
+                              : selectedOrder.paymentMethod === 'cod'
+                              ? 'COD — Uncollected'
+                              : 'Unverified Test Checkout'}
+                          </span>
+                        </div>
                         {selectedOrder.estimatedDelivery && (
-                          <div className="flex items-center gap-1.5 text-xs text-teal-700 font-bold pt-1">
-                            <Truck className="w-4 h-4 text-teal-600" />
+                          <div className="flex items-center gap-1.5 text-xs text-teal-800 font-semibold pt-1.5 border-t border-slate-100">
+                            <Truck className="w-4 h-4 text-teal-700 shrink-0" />
                             <span>{selectedOrder.estimatedDelivery}</span>
                           </div>
                         )}
                       </div>
 
                       {/* Timeline Milestones */}
-                      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
+                      <div className="bg-white p-4 rounded-2xl border border-slate-200">
                         <h3 className="font-bold text-xs uppercase tracking-wider text-slate-700 mb-3">
                           Fulfilment Milestones
                         </h3>
@@ -3430,7 +4991,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                                 <div
                                   className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold ${
                                     step.completed
-                                      ? 'bg-teal-500 text-white'
+                                      ? 'bg-teal-600 text-white'
                                       : 'bg-slate-200 text-slate-500'
                                   }`}
                                 >
@@ -3439,7 +5000,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                                 {idx < selectedOrder.timeline.length - 1 && (
                                   <div
                                     className={`w-0.5 h-6 mt-1 ${
-                                      step.completed ? 'bg-teal-500' : 'bg-slate-200'
+                                      step.completed ? 'bg-teal-600' : 'bg-slate-200'
                                     }`}
                                   />
                                 )}
@@ -3460,30 +5021,30 @@ class OrderDetailViewScreen extends StatelessWidget {
                       </div>
 
                       {/* Purchased Products */}
-                      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
+                      <div className="bg-white p-4 rounded-2xl border border-slate-200">
                         <h3 className="font-bold text-xs uppercase tracking-wider text-slate-700 mb-2.5">
-                          Purchased Purifiers & Consumables
+                          Purchased Purifiers &amp; Consumables
                         </h3>
                         <div className="space-y-2 text-xs divide-y divide-slate-100">
                           {selectedOrder.items.map((item) => (
-                            <div key={item.productId} className="pt-2 flex items-center justify-between">
-                              <div className="flex items-center gap-2.5">
-                                <img
+                            <div key={item.productId} className="pt-2 flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <ProductStudioImage
                                   src={item.imageUrl}
                                   alt={item.productName}
-                                  className="w-10 h-10 rounded-lg object-cover bg-slate-100"
+                                  className="w-10 h-10 rounded-lg"
                                 />
-                                <div>
-                                  <p className="font-bold text-[#0A2540] truncate max-w-[160px]">
+                                <div className="min-w-0">
+                                  <p className="font-bold text-[#0A2540] truncate">
                                     {item.productName}
                                   </p>
-                                  <p className="text-[10px] text-slate-400">
-                                    Qty: {item.quantity} × ₹{item.unitPrice.toLocaleString()}
+                                  <p className="text-[10.5px] text-slate-500 font-mono tabular-nums">
+                                    Qty: {item.quantity} × ₹{item.unitPrice.toLocaleString('en-IN')}
                                   </p>
                                 </div>
                               </div>
-                              <span className="font-bold text-[#0A2540]">
-                                ₹{(item.quantity * item.unitPrice).toLocaleString()}
+                              <span className="font-bold text-[#0A2540] font-mono tabular-nums shrink-0">
+                                ₹{(item.quantity * item.unitPrice).toLocaleString('en-IN')}
                               </span>
                             </div>
                           ))}
@@ -3491,21 +5052,23 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                         <div className="border-t border-slate-100 mt-3 pt-2 flex justify-between font-extrabold text-xs text-[#0A2540]">
                           <span>Grand Total</span>
-                          <span>₹{selectedOrder.totalAmount.toLocaleString()}</span>
+                          <span className="font-mono tabular-nums">
+                            ₹{selectedOrder.totalAmount.toLocaleString('en-IN')}
+                          </span>
                         </div>
                       </div>
 
                       {/* Delivery Address */}
-                      <div className="bg-white p-4 rounded-2xl border border-slate-200 text-xs shadow-xs">
+                      <div className="bg-white p-4 rounded-2xl border border-slate-200 text-xs">
                         <h3 className="font-bold text-xs uppercase tracking-wider text-slate-700 mb-2">
                           Destination Address
                         </h3>
                         <p className="font-bold text-[#0A2540]">{selectedOrder.deliveryAddress.name}</p>
                         <p className="text-slate-600 text-[11px] mt-0.5 leading-relaxed">
                           {selectedOrder.deliveryAddress.address}, {selectedOrder.deliveryAddress.city} -{' '}
-                          {selectedOrder.deliveryAddress.pincode}
+                          <span className="font-mono tabular-nums">{selectedOrder.deliveryAddress.pincode}</span>
                         </p>
-                        <p className="text-slate-400 text-[11px] mt-1">
+                        <p className="text-slate-500 text-[11px] mt-1 font-mono tabular-nums">
                           Phone: {selectedOrder.deliveryAddress.phone}
                         </p>
                       </div>
@@ -3628,6 +5191,51 @@ class OrderDetailViewScreen extends StatelessWidget {
                             <div>
                               <h4 className="font-bold text-xs text-[#0A2540]">My Order History</h4>
                               <p className="text-[10.5px] text-slate-400">{orders.length} orders placed</p>
+                            </div>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        </div>
+
+                        {/* Notifications Inbox Shortcut -> Opens Screen 25 */}
+                        <div
+                          onClick={() => setCurrentScreen('notifications')}
+                          className="bg-white p-3 rounded-2xl border border-slate-200 flex items-center justify-between cursor-pointer hover:border-slate-300 transition-colors shadow-2xs"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="w-9 h-9 rounded-xl bg-teal-50 text-teal-700 flex items-center justify-center">
+                              <Bell className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <h4 className="font-bold text-xs text-[#0A2540]">
+                                Notifications &amp; Order Alerts
+                              </h4>
+                              <p className="text-[10.5px] text-slate-400">
+                                {unreadNotificationCount} unread · FCM &amp; trusted order updates
+                              </p>
+                            </div>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        </div>
+
+                        {/* Delivery Location Map Shortcut -> Opens Screen 26 */}
+                        <div
+                          onClick={() => {
+                            setReturnScreenAfterLocationSave('address_management');
+                            setCurrentScreen('delivery_location');
+                          }}
+                          className="bg-white p-3 rounded-2xl border border-slate-200 flex items-center justify-between cursor-pointer hover:border-slate-300 transition-colors shadow-2xs"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="w-9 h-9 rounded-xl bg-slate-100 text-[#0A2540] flex items-center justify-center">
+                              <Navigation className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <h4 className="font-bold text-xs text-[#0A2540]">
+                                Set Delivery Location (OpenStreetMap)
+                              </h4>
+                              <p className="text-[10.5px] text-slate-400">
+                                Pin selector &amp; manual postal fallback
+                              </p>
                             </div>
                           </div>
                           <ChevronRight className="w-4 h-4 text-slate-400" />
@@ -3782,24 +5390,14 @@ class OrderDetailViewScreen extends StatelessWidget {
                       </button>
                       <h2 className="text-base font-extrabold text-[#0A2540]">Saved Addresses</h2>
                       <button
+                        type="button"
                         onClick={() => {
-                          setEditingAddressId(null);
-                          setAddressForm({
-                            recipientName: profile.fullName,
-                            phone: profile.phone,
-                            streetAddress: '',
-                            city: 'Mumbai',
-                            state: 'Maharashtra',
-                            postalCode: '400050',
-                            deliveryInstructions: '',
-                            label: 'Home',
-                            isDefault: addresses.length === 0,
-                          });
-                          setIsAddressModalOpen(true);
+                          setReturnScreenAfterLocationSave('address_management');
+                          setCurrentScreen('delivery_location');
                         }}
-                        className="text-xs font-bold text-teal-600 hover:text-teal-700"
+                        className="text-xs font-bold text-teal-600 hover:text-teal-700 cursor-pointer"
                       >
-                        + Add
+                        + Map / Add
                       </button>
                     </div>
 
@@ -3910,28 +5508,18 @@ class OrderDetailViewScreen extends StatelessWidget {
                       )}
                     </div>
 
-                    {/* Bottom CTA */}
+                    {/* Bottom CTA -> Opens Screen 26 Delivery Location */}
                     <div className="p-3 bg-white border-t border-slate-200 shrink-0">
                       <button
+                        type="button"
                         onClick={() => {
-                          setEditingAddressId(null);
-                          setAddressForm({
-                            recipientName: profile.fullName,
-                            phone: profile.phone,
-                            streetAddress: '',
-                            city: 'Mumbai',
-                            state: 'Maharashtra',
-                            postalCode: '400050',
-                            deliveryInstructions: '',
-                            label: 'Home',
-                            isDefault: addresses.length === 0,
-                          });
-                          setIsAddressModalOpen(true);
+                          setReturnScreenAfterLocationSave('address_management');
+                          setCurrentScreen('delivery_location');
                         }}
-                        className="w-full py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-md flex items-center justify-center gap-2"
+                        className="w-full py-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs shadow-md flex items-center justify-center gap-2 cursor-pointer"
                       >
-                        <Plus className="w-4 h-4" />
-                        <span>Add New Delivery Address</span>
+                        <Navigation className="w-4 h-4" />
+                        <span>Add Delivery Location (Map or Manual)</span>
                       </button>
                     </div>
                   </div>
@@ -4222,7 +5810,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                         <ShoppingCart className="w-4 h-4" />
                         <span className="text-[10px]">Bulk Cart</span>
                         {Object.values(wholesaleCart).reduce((a, b) => a + b, 0) > 0 && (
-                          <span className="absolute 1 top-0 right-2 w-2 h-2 rounded-full bg-teal-500" />
+                          <span className="absolute top-0 right-2 w-2 h-2 rounded-full bg-teal-500" />
                         )}
                       </button>
                       <button
@@ -4908,7 +6496,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                           <ShoppingCart className="w-4 h-4" />
                           <span className="text-[10px]">Bulk Cart</span>
                           {Object.values(wholesaleCart).reduce((a, b) => a + b, 0) > 0 && (
-                            <span className="absolute 1 top-0 right-2 w-2 h-2 rounded-full bg-teal-500" />
+                            <span className="absolute top-0 right-2 w-2 h-2 rounded-full bg-teal-500" />
                           )}
                         </button>
                         <button onClick={() => setCurrentScreen('dealer_order_history')} className="flex flex-col items-center gap-0.5 text-[#0A2540] font-bold">
@@ -5777,6 +7365,738 @@ class OrderDetailViewScreen extends StatelessWidget {
                   );
                 })()}
 
+                {/* ================= SCREEN 25: NOTIFICATIONS ================= */}
+                {currentScreen === 'notifications' && (() => {
+                  const displayedNotifications =
+                    notificationsFilter === 'unread'
+                      ? activeNotifications.filter((n) => !n.isRead)
+                      : activeNotifications;
+
+                  return (
+                    <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+                      {/* Compact Top App Bar */}
+                      <div className="bg-white px-4 h-14 border-b border-slate-100 flex items-center justify-between gap-2 shrink-0">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => setCurrentScreen('home')}
+                            aria-label="Back to Home"
+                            className="min-w-[40px] min-h-[40px] -ml-2 rounded-xl flex items-center justify-center text-[#0A2540] hover:bg-slate-100 cursor-pointer"
+                          >
+                            <ArrowLeft className="w-4 h-4" />
+                          </button>
+                          <h2 className="text-sm font-extrabold text-[#0A2540] truncate">
+                            Notifications
+                          </h2>
+                        </div>
+
+                        {unreadNotificationCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={handleMarkAllNotificationsRead}
+                            className="min-h-[40px] px-2.5 rounded-lg text-xs font-bold text-teal-700 hover:bg-teal-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            Mark all read
+                          </button>
+                        ) : (
+                          <span className="text-[10.5px] font-mono tabular-nums text-slate-400 shrink-0">
+                            {firebaseUser ? 'Live Inbox' : 'Demo Inbox'}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Foreground Notification Heads-Up Banner (Distinct from Background OS Tray) */}
+                      {foregroundBannerAlert && (
+                        <div className="mx-3.5 mt-2.5 p-3 rounded-2xl bg-[#0A2540] text-white flex items-start justify-between gap-2.5 shadow-md shrink-0">
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="text-[10.5px] font-semibold text-teal-300">
+                              Foreground Notification Event
+                            </div>
+                            <div className="text-xs font-bold truncate">
+                              {foregroundBannerAlert.title}
+                            </div>
+                            <p className="text-[11px] text-slate-300 leading-snug">
+                              {foregroundBannerAlert.body}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setForegroundBannerAlert(null)}
+                            aria-label="Dismiss foreground notification banner"
+                            className="min-w-[36px] min-h-[36px] rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10 shrink-0 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Scrollable Notification Feed */}
+                      <div className="flex-1 overflow-y-auto p-3.5 space-y-3 pb-6">
+                        {/* Honest FCM Permission & Device Token Registration Card */}
+                        {fcmStatus && (
+                          <div
+                            className={`p-3 rounded-2xl bg-white border space-y-2 ${
+                              fcmStatus.isPushRegistered
+                                ? 'border-teal-600'
+                                : 'border-slate-200'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-start gap-2.5 min-w-0">
+                                <div
+                                  className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                                    fcmStatus.isPushRegistered
+                                      ? 'bg-teal-50 text-teal-700'
+                                      : 'bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  <Bell className="w-4 h-4" />
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-[#0A2540]">
+                                    {fcmStatus.summaryTitle}
+                                  </div>
+                                  <p className="text-[10.5px] text-slate-500 leading-relaxed mt-0.5">
+                                    {fcmStatus.detailMessage}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="pt-1.5 border-t border-slate-100 flex items-center justify-between gap-2 text-[10.5px] text-slate-500">
+                              <span className="font-mono tabular-nums truncate">
+                                Permission: {fcmStatus.browserPermission} ·{' '}
+                                {fcmStatus.isPushRegistered
+                                  ? 'Token Registered'
+                                  : 'No Push Fabricated'}
+                              </span>
+                              {(fcmStatus.mode === 'permission_default' ||
+                                fcmStatus.mode === 'vapid_or_sw_unconfigured') && (
+                                <button
+                                  type="button"
+                                  disabled={isRequestingFcm}
+                                  onClick={handleRequestPushPermissions}
+                                  className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0A2540] font-bold text-[11px] whitespace-nowrap shrink-0 cursor-pointer"
+                                >
+                                  {isRequestingFcm ? 'Checking...' : 'Configure Push'}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Interactive Filter Controls (All vs Unread) */}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1 p-1 bg-slate-200/70 rounded-xl">
+                            <button
+                              type="button"
+                              onClick={() => setNotificationsFilter('all')}
+                              className={`min-h-[38px] px-3 rounded-lg text-xs font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                                notificationsFilter === 'all'
+                                  ? 'bg-white text-[#0A2540] shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              All ({activeNotifications.length})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setNotificationsFilter('unread')}
+                              className={`min-h-[38px] px-3 rounded-lg text-xs font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                                notificationsFilter === 'unread'
+                                  ? 'bg-white text-[#0A2540] shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              Unread ({unreadNotificationCount})
+                            </button>
+                          </div>
+
+                          <span className="text-[10.5px] text-slate-500 whitespace-nowrap">
+                            {firebaseUser && firebaseUser.emailVerified
+                              ? 'Firestore Trusted Stream'
+                              : 'Demo Preview Data'}
+                          </span>
+                        </div>
+
+                        {/* Loading / Empty / Notification List */}
+                        {isLoadingNotifications ? (
+                          <div className="py-14 flex flex-col items-center justify-center gap-2 text-slate-500">
+                            <RefreshCw className="w-5 h-5 animate-spin text-teal-600" />
+                            <span className="text-xs font-medium">
+                              Syncing trusted notifications...
+                            </span>
+                          </div>
+                        ) : displayedNotifications.length === 0 ? (
+                          <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center space-y-2.5 my-2">
+                            <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto">
+                              <Bell className="w-5 h-5" />
+                            </div>
+                            <h3 className="text-sm font-extrabold text-[#0A2540]">
+                              {notificationsFilter === 'unread'
+                                ? 'All Notifications Read'
+                                : 'No Notifications Yet'}
+                            </h3>
+                            <p className="text-[11.5px] text-slate-500 leading-relaxed max-w-[250px] mx-auto">
+                              {notificationsFilter === 'unread'
+                                ? 'You have caught up on every order dispatch, delivery, and payment update.'
+                                : firebaseUser
+                                ? 'Trusted order updates from Califnco Order Management (Page 20) or Cloud Functions will appear here.'
+                                : 'Order confirmation, dispatch, and delivery alerts will appear here when triggered by backend events.'}
+                            </p>
+                            {notificationsFilter === 'unread' && activeNotifications.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setNotificationsFilter('all')}
+                                className="mt-1 min-h-[42px] px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0A2540] font-bold text-xs cursor-pointer"
+                              >
+                                Show All Notifications
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="space-y-2.5">
+                            {displayedNotifications.map((item) => {
+                              const unread = !item.isRead;
+                              return (
+                                <article
+                                  key={item.id}
+                                  className={`p-3.5 rounded-2xl border transition-colors space-y-2 ${
+                                    unread
+                                      ? 'bg-teal-50/40 border-teal-600/60'
+                                      : 'bg-white border-slate-200'
+                                  }`}
+                                >
+                                  <div className="flex items-start gap-2.5">
+                                    <div
+                                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                                        unread
+                                          ? 'bg-teal-100/80 text-teal-800'
+                                          : 'bg-slate-100 text-slate-500'
+                                      }`}
+                                    >
+                                      {item.eventType === 'order_dispatched' ? (
+                                        <Truck className="w-4 h-4" />
+                                      ) : item.eventType === 'payment_settled' ? (
+                                        <CreditCard className="w-4 h-4" />
+                                      ) : item.eventType === 'order_delivered' ? (
+                                        <CheckCircle2 className="w-4 h-4" />
+                                      ) : (
+                                        <Package className="w-4 h-4" />
+                                      )}
+                                    </div>
+
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-start justify-between gap-2">
+                                        <h3
+                                          className={`text-xs leading-snug ${
+                                            unread
+                                              ? 'font-extrabold text-[#0A2540]'
+                                              : 'font-semibold text-slate-700'
+                                          }`}
+                                        >
+                                          {item.title}
+                                        </h3>
+                                        <span
+                                          className={`text-[10.5px] font-bold whitespace-nowrap shrink-0 ${
+                                            unread ? 'text-teal-700' : 'text-slate-400'
+                                          }`}
+                                        >
+                                          {unread ? 'Unread' : 'Read'}
+                                        </span>
+                                      </div>
+
+                                      <p className="text-[11.5px] text-slate-600 leading-relaxed mt-1">
+                                        {item.body}
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2 text-[10.5px] text-slate-500">
+                                    <div className="font-mono tabular-nums truncate">
+                                      <span>{formatRelativeNotificationTime(item.createdAtIso)}</span>
+                                      {item.orderNumber && (
+                                        <>
+                                          <span aria-hidden="true"> · </span>
+                                          <span>{item.orderNumber}</span>
+                                        </>
+                                      )}
+                                      <span aria-hidden="true"> · </span>
+                                      <span>
+                                        {item.persistedToFirestore ? 'Trusted Event' : 'Demo'}
+                                      </span>
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      {item.orderNumber && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (unread) void handleMarkNotificationRead(item);
+                                            setCurrentScreen('order_detail_view');
+                                          }}
+                                          className="min-h-[36px] px-2 rounded-lg text-[11px] font-semibold text-slate-600 hover:bg-slate-100 whitespace-nowrap cursor-pointer"
+                                        >
+                                          Order
+                                        </button>
+                                      )}
+                                      {unread && (
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleMarkNotificationRead(item)}
+                                          className="min-h-[36px] px-2.5 rounded-lg bg-[#0A2540] hover:bg-[#061B2E] text-white text-[11px] font-bold whitespace-nowrap cursor-pointer"
+                                        >
+                                          Mark as read
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                </article>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* ================= SCREEN 26: DELIVERY LOCATION ================= */}
+                {currentScreen === 'delivery_location' && (() => {
+                  const showInteractiveMap = !manualAddressFallbackMode && !osmTileLoadFailed;
+
+                  return (
+                    <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+                      {/* Compact Top App Bar */}
+                      <div className="bg-white px-4 h-14 border-b border-slate-100 flex items-center justify-between gap-2 shrink-0">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => setCurrentScreen(returnScreenAfterLocationSave)}
+                            aria-label="Back"
+                            className="min-w-[40px] min-h-[40px] -ml-2 rounded-xl flex items-center justify-center text-[#0A2540] hover:bg-slate-100 cursor-pointer"
+                          >
+                            <ArrowLeft className="w-4 h-4" />
+                          </button>
+                          <h2 className="text-sm font-extrabold text-[#0A2540] truncate">
+                            Delivery Location
+                          </h2>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextManual = !manualAddressFallbackMode;
+                            setManualAddressFallbackMode(nextManual);
+                            if (nextManual) {
+                              setLocationCaptureSource('manual_only');
+                            } else if (selectedMapPin) {
+                              setLocationCaptureSource('map_pin');
+                            }
+                          }}
+                          className="min-h-[40px] px-2.5 rounded-lg text-xs font-bold text-teal-700 hover:bg-teal-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          {manualAddressFallbackMode ? 'Use Map Pin' : 'Manual Fallback'}
+                        </button>
+                      </div>
+
+                      {/* Scrollable Map & Postal Form */}
+                      <div className="flex-1 overflow-y-auto p-3.5 space-y-3 pb-6">
+                        {locSubmitError && (
+                          <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-red-800 text-[11px] font-medium flex items-start gap-2">
+                            <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                            <span>{locSubmitError}</span>
+                          </div>
+                        )}
+
+                        {/* OpenStreetMap Display OR Manual Address Fallback Surface */}
+                        {showInteractiveMap ? (
+                          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                            <OpenStreetMapPicker
+                              selectedPin={selectedMapPin}
+                              center={mapCenter}
+                              onSelectPin={(pt) => {
+                                setSelectedMapPin(pt);
+                                setLocationCaptureSource('map_pin');
+                              }}
+                              onTileLoadError={() => setOsmTileLoadFailed(true)}
+                            />
+
+                            {/* Map Controls & Coordinate Readout */}
+                            <div className="p-3 space-y-2 border-t border-slate-100 text-xs">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="font-mono tabular-nums text-[11px] font-semibold text-[#0A2540] truncate">
+                                  {selectedMapPin
+                                    ? `Pin: ${selectedMapPin.lat.toFixed(5)}, ${selectedMapPin.lng.toFixed(5)}`
+                                    : 'No pin selected · Tap map to drop pin'}
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    disabled={isLocatingBrowserGps}
+                                    onClick={handleBrowserLocateMe}
+                                    className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0A2540] font-bold text-[11px] flex items-center gap-1 whitespace-nowrap cursor-pointer"
+                                  >
+                                    <Navigation className="w-3 h-3 text-teal-600" />
+                                    <span>{isLocatingBrowserGps ? 'Locating...' : 'GPS Pin'}</span>
+                                  </button>
+                                  {selectedMapPin && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedMapPin(null);
+                                        setLocationCaptureSource('manual_only');
+                                      }}
+                                      className="min-h-[36px] px-2 rounded-lg text-[11px] font-semibold text-slate-500 hover:bg-slate-100 whitespace-nowrap cursor-pointer"
+                                    >
+                                      Clear
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Quick City Center Jump Presets (moves map camera only; never fabricates street address) */}
+                              <div className="flex gap-1.5 overflow-x-auto no-scrollbar pt-0.5">
+                                {OSM_NEIGHBORHOOD_PRESETS.map((preset) => (
+                                  <button
+                                    key={preset.label}
+                                    type="button"
+                                    onClick={() => {
+                                      setMapCenter(preset.point);
+                                      setSelectedMapPin(preset.point);
+                                      setLocationCaptureSource('map_pin');
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-[10.5px] font-medium text-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
+                                  >
+                                    {preset.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2 text-xs">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <div className="font-extrabold text-[#0A2540]">
+                                  {osmTileLoadFailed
+                                    ? 'OpenStreetMap Tiles Unavailable — Manual Entry Active'
+                                    : 'Manual Address Entry Fallback Active'}
+                                </div>
+                                <p className="text-[11px] text-slate-500 leading-relaxed mt-0.5">
+                                  Your delivery address will be saved using postal text fields only (
+                                  <code>locationSource: manual_only</code>) with no map coordinates
+                                  required.
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setOsmTileLoadFailed(false);
+                                  setManualAddressFallbackMode(false);
+                                  if (!selectedMapPin) {
+                                    setSelectedMapPin(mapCenter);
+                                  }
+                                  setLocationCaptureSource('map_pin');
+                                }}
+                                className="min-h-[36px] px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0A2540] font-bold text-[11px] whitespace-nowrap shrink-0 cursor-pointer"
+                              >
+                                Show Map
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Critical Invariant Disclosure: Map Coordinate != Verified Postal Address */}
+                        <div className="p-3 rounded-2xl bg-amber-50/80 border border-amber-200 text-[11px] text-amber-950 leading-relaxed">
+                          <span className="font-bold">Unverified Coordinate Notice:</span> Selecting
+                          a map pin records latitude/longitude to assist technician &amp; courier
+                          routing, and never automatically produces a verified postal address. Enter
+                          and confirm your complete street address and PIN code below.
+                        </div>
+
+                        {/* Address Label & Postal Text Fields */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-3 text-xs">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-extrabold text-[#0A2540]">
+                              Postal Address Details
+                            </span>
+                            <div className="flex gap-1 bg-slate-100 p-0.5 rounded-xl">
+                              {(['Home', 'Work', 'Other'] as const).map((tag) => (
+                                <button
+                                  key={tag}
+                                  type="button"
+                                  onClick={() => setLocLabel(tag)}
+                                  className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+                                    locLabel === tag
+                                      ? 'bg-[#0A2540] text-white'
+                                      : 'text-slate-600 hover:text-slate-900'
+                                  }`}
+                                >
+                                  {tag}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="loc-recipient"
+                              className="block text-[11px] font-bold text-slate-700 mb-1"
+                            >
+                              Recipient Full Name *
+                            </label>
+                            <input
+                              id="loc-recipient"
+                              type="text"
+                              value={locRecipientName}
+                              onChange={(e) => {
+                                setLocRecipientName(e.target.value);
+                                setLocFormErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next.recipientName;
+                                  return next;
+                                });
+                              }}
+                              placeholder="e.g. Sarah Jenkins"
+                              className={`w-full min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600 ${
+                                locFormErrors.recipientName ? 'border-red-400' : 'border-slate-200'
+                              }`}
+                            />
+                            {locFormErrors.recipientName && (
+                              <p className="text-[11px] text-red-600 font-medium mt-1">
+                                {locFormErrors.recipientName}
+                              </p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="loc-phone"
+                              className="block text-[11px] font-bold text-slate-700 mb-1"
+                            >
+                              Contact Phone Number *
+                            </label>
+                            <input
+                              id="loc-phone"
+                              type="tel"
+                              value={locPhone}
+                              onChange={(e) => {
+                                setLocPhone(e.target.value);
+                                setLocFormErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next.phone;
+                                  return next;
+                                });
+                              }}
+                              placeholder="+91 98765 43210"
+                              className={`w-full min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs font-mono tabular-nums text-slate-800 outline-none focus:border-teal-600 ${
+                                locFormErrors.phone ? 'border-red-400' : 'border-slate-200'
+                              }`}
+                            />
+                            {locFormErrors.phone && (
+                              <p className="text-[11px] text-red-600 font-medium mt-1">
+                                {locFormErrors.phone}
+                              </p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="loc-street"
+                              className="block text-[11px] font-bold text-slate-700 mb-1"
+                            >
+                              Flat / House No., Building &amp; Street *
+                            </label>
+                            <textarea
+                              id="loc-street"
+                              rows={2}
+                              value={locStreetAddress}
+                              onChange={(e) => {
+                                setLocStreetAddress(e.target.value);
+                                setLocFormErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next.streetAddress;
+                                  return next;
+                                });
+                              }}
+                              placeholder="Flat 402, Green Park Avenue, Link Road"
+                              className={`w-full px-3 py-2 rounded-xl border bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600 resize-none ${
+                                locFormErrors.streetAddress ? 'border-red-400' : 'border-slate-200'
+                              }`}
+                            />
+                            {locFormErrors.streetAddress && (
+                              <p className="text-[11px] text-red-600 font-medium mt-1">
+                                {locFormErrors.streetAddress}
+                              </p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="loc-landmark"
+                              className="block text-[11px] font-bold text-slate-700 mb-1"
+                            >
+                              Landmark (Optional)
+                            </label>
+                            <input
+                              id="loc-landmark"
+                              type="text"
+                              value={locLandmark}
+                              onChange={(e) => setLocLandmark(e.target.value)}
+                              placeholder="Near Metro Station / Water Tank"
+                              className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600"
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2.5">
+                            <div>
+                              <label
+                                htmlFor="loc-city"
+                                className="block text-[11px] font-bold text-slate-700 mb-1"
+                              >
+                                City / Town *
+                              </label>
+                              <input
+                                id="loc-city"
+                                type="text"
+                                value={locCity}
+                                onChange={(e) => {
+                                  setLocCity(e.target.value);
+                                  setLocFormErrors((prev) => {
+                                    const next = { ...prev };
+                                    delete next.city;
+                                    return next;
+                                  });
+                                }}
+                                placeholder="Mumbai"
+                                className={`w-full min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600 ${
+                                  locFormErrors.city ? 'border-red-400' : 'border-slate-200'
+                                }`}
+                              />
+                              {locFormErrors.city && (
+                                <p className="text-[11px] text-red-600 font-medium mt-1">
+                                  {locFormErrors.city}
+                                </p>
+                              )}
+                            </div>
+
+                            <div>
+                              <label
+                                htmlFor="loc-pin"
+                                className="block text-[11px] font-bold text-slate-700 mb-1"
+                              >
+                                Postal / PIN Code *
+                              </label>
+                              <input
+                                id="loc-pin"
+                                type="text"
+                                value={locPostalCode}
+                                onChange={(e) => {
+                                  setLocPostalCode(e.target.value);
+                                  setLocFormErrors((prev) => {
+                                    const next = { ...prev };
+                                    delete next.postalCode;
+                                    return next;
+                                  });
+                                }}
+                                placeholder="400050"
+                                className={`w-full min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs font-mono tabular-nums text-slate-800 outline-none focus:border-teal-600 ${
+                                  locFormErrors.postalCode ? 'border-red-400' : 'border-slate-200'
+                                }`}
+                              />
+                              {locFormErrors.postalCode && (
+                                <p className="text-[11px] text-red-600 font-medium mt-1">
+                                  {locFormErrors.postalCode}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="loc-state"
+                              className="block text-[11px] font-bold text-slate-700 mb-1"
+                            >
+                              State / Province *
+                            </label>
+                            <input
+                              id="loc-state"
+                              type="text"
+                              value={locState}
+                              onChange={(e) => {
+                                setLocState(e.target.value);
+                                setLocFormErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next.state;
+                                  return next;
+                                });
+                              }}
+                              placeholder="Maharashtra"
+                              className={`w-full min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600 ${
+                                locFormErrors.state ? 'border-red-400' : 'border-slate-200'
+                              }`}
+                            />
+                            {locFormErrors.state && (
+                              <p className="text-[11px] text-red-600 font-medium mt-1">
+                                {locFormErrors.state}
+                              </p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="loc-instructions"
+                              className="block text-[11px] font-bold text-slate-700 mb-1"
+                            >
+                              Delivery Instructions (Optional)
+                            </label>
+                            <input
+                              id="loc-instructions"
+                              type="text"
+                              value={locInstructions}
+                              onChange={(e) => setLocInstructions(e.target.value)}
+                              placeholder="Gate pass / security desk instructions"
+                              className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600"
+                            />
+                          </div>
+
+                          <label className="flex items-center gap-2.5 min-h-[40px] pt-0.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={locIsDefault}
+                              onChange={(e) => setLocIsDefault(e.target.checked)}
+                              className="w-4 h-4 accent-teal-600 rounded"
+                            />
+                            <span className="text-xs font-semibold text-slate-700">
+                              Set as default delivery address ({firestoreSavedLocations.length || addresses.length} saved)
+                            </span>
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* Sticky Save Address CTA */}
+                      <div className="bg-white border-t border-slate-200 px-4 py-3 shrink-0">
+                        <button
+                          type="button"
+                          disabled={isSavingLocation}
+                          onClick={() => void handleSaveDeliveryLocation()}
+                          className="w-full min-h-[48px] rounded-xl bg-[#0A2540] hover:bg-[#061B2E] disabled:opacity-60 text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                        >
+                          {isSavingLocation ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                              <span>Saving Delivery Address...</span>
+                            </>
+                          ) : (
+                            <span>Save Address</span>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Modal Sheet: View My Requests (ServiceRepository Stream) */}
                 {isMyRequestsDrawerOpen && (
                   <div className="absolute inset-0 bg-black/50 z-40 flex items-end">
@@ -6063,10 +8383,14 @@ class OrderDetailViewScreen extends StatelessWidget {
                           Cancel
                         </button>
                         <button
-                          onClick={() => {
+                          onClick={async () => {
+                            if (firebaseUser) {
+                              await revokeWebDeviceTokenOnSignOut(firebaseUser.uid);
+                              await signOut(auth);
+                            }
                             setShowLogoutConfirm(false);
                             setCurrentScreen('welcome');
-                            showToast('Signed out successfully.');
+                            showToast('Signed out and revoked registered device push token.');
                           }}
                           className="flex-1 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-xs shadow-md"
                         >
@@ -6126,16 +8450,49 @@ class OrderDetailViewScreen extends StatelessWidget {
                     Mobile Application Screens
                   </h3>
                   <span className="text-[11px] text-slate-400 font-mono tabular-nums">
-                    Screens 1–18, 23–24
+                    Screens 1–18, 23–26
                   </span>
                 </div>
 
                 <div className="max-h-64 overflow-y-auto space-y-2.5 pr-1 text-xs">
-                  {/* Segment 10: Active */}
+                  {/* Segment 11: Active */}
                   <div>
                     <div className="text-[10.5px] font-semibold text-teal-300 mb-1 flex items-center justify-between">
-                      <span>Segment 10: Service Booking</span>
+                      <span>Segment 11: Notifications &amp; Location</span>
                       <span className="text-[10px] text-teal-400 font-mono">Current</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('notifications')}
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          currentScreen === 'notifications'
+                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
+                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-[9.5px] text-teal-400 font-mono">Screen 25</div>
+                        <div className="truncate text-[11px]">Notifications</div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('delivery_location')}
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          currentScreen === 'delivery_location'
+                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
+                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-[9.5px] text-teal-400 font-mono">Screen 26</div>
+                        <div className="truncate text-[11px]">Delivery Location</div>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Segment 10 */}
+                  <div>
+                    <div className="text-[10.5px] font-semibold text-slate-400 mb-1">
+                      Segment 10: Service Booking
                     </div>
                     <div className="grid grid-cols-2 gap-1.5">
                       <button
@@ -6144,10 +8501,10 @@ class OrderDetailViewScreen extends StatelessWidget {
                         className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'service_booking'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9.5px] text-teal-400 font-mono">Screen 23</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 23</div>
                         <div className="truncate text-[11px]">Service Booking</div>
                       </button>
                       <button
@@ -6156,10 +8513,10 @@ class OrderDetailViewScreen extends StatelessWidget {
                         className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'booking_confirmation'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9.5px] text-teal-400 font-mono">Screen 24</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 24</div>
                         <div className="truncate text-[11px]">Confirmation</div>
                       </button>
                     </div>
@@ -6356,121 +8713,84 @@ class OrderDetailViewScreen extends StatelessWidget {
                 </div>
               </div>
 
-              {/* Screens 23 & 24 Interactive Verification Scenarios */}
+              {/* Screens 25 & 26 Interactive Verification Scenarios */}
               <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4">
                 <h3 className="text-xs font-semibold text-slate-200 mb-3">
-                  Screens 23 &amp; 24 Verification Scenarios
+                  Screens 25 &amp; 26 Verification Scenarios
                 </h3>
 
                 <div className="space-y-2">
                   <button
                     type="button"
-                    onClick={async () => {
-                      const nextEnabled = !simulatedScheduleEnabled;
-                      setSimulatedScheduleEnabled(nextEnabled);
-                      await setFirestoreScheduleConfigForTesting({
-                        dateIso: servicePreferredDate,
-                        postalCode: servicePostalCode,
-                        enable: nextEnabled,
-                      });
-                      setCurrentScreen('service_booking');
-                      showToast(
-                        nextEnabled
-                          ? 'Configured scheduling slots enabled for current date & PIN.'
-                          : 'Scheduling system unconfigured: time slots hidden (no slot promised).'
-                      );
+                    disabled={isEmittingOrderEvent}
+                    onClick={() => {
+                      setCurrentScreen('notifications');
+                      void handleEmitTrustedOrderEvent('order_dispatched');
                     }}
                     className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer"
                   >
                     <div>
                       <div className="font-semibold text-slate-200">
-                        01. Toggle Configured Scheduling System
+                        01. Emit Trusted Order Dispatch Event
                       </div>
                       <div className="text-[11px] text-slate-400">
-                        {simulatedScheduleEnabled || scheduleLookup.isConfigured
-                          ? 'Active: Supplying time slots from schedule config'
-                          : 'Default Off: Hides time slots when unconfigured'}
+                        Writes to /notifications (Admin) &amp; shows foreground banner
                       </div>
                     </div>
                     <span className="text-[10.5px] font-mono text-teal-400 shrink-0">
-                      {simulatedScheduleEnabled || scheduleLookup.isConfigured ? 'ON' : 'OFF'}
+                      {isEmittingOrderEvent ? 'Sending' : 'Trigger'}
                     </span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => {
-                      setCurrentScreen('service_booking');
-                      setServiceCategory('Repair');
-                      setServiceProductId('wp-01');
-                      setServiceProductModel('Califnco Hydra Pure Elite RO+UV+Copper');
-                      setServiceDescription('Short');
-                      setServiceContactPhone('12345');
-                      const errs = validateMobileServiceBookingForm({
-                        category: 'Repair',
-                        productId: 'wp-01',
-                        productModel: 'Califnco Hydra Pure Elite RO+UV+Copper',
-                        issueDescription: 'Short',
-                        streetAddress: serviceStreetAddress,
-                        cityState: serviceCityState,
-                        postalCode: servicePostalCode,
-                        preferredDateIso: servicePreferredDate,
-                        preferredTimeSlot: '',
-                        isScheduleConfigured: false,
-                        configuredSlots: [],
-                        contactName: serviceContactName,
-                        contactPhone: '12345',
-                      });
-                      setServiceFormErrors(errs);
-                      setServiceSubmitError(
-                        'Validation blocked submission: inspect inline errors on description and phone.'
-                      );
+                      setCurrentScreen('notifications');
+                      setSimulateEmptyInbox((prev) => !prev);
                     }}
                     className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer"
                   >
                     <div>
                       <div className="font-semibold text-slate-200">
-                        02. Trigger Form Validation Guards
+                        02. Toggle Screen 25 Empty Inbox State
                       </div>
                       <div className="text-[11px] text-slate-400">
-                        Tests minimum issue description &amp; phone validation
+                        Inspects clean empty state vs unread/read list
                       </div>
                     </div>
-                    <span className="text-[10.5px] font-mono text-amber-400 shrink-0">Test</span>
+                    <span className="text-[10.5px] font-mono text-teal-400 shrink-0">
+                      {simulateEmptyInbox ? 'Empty' : 'Populated'}
+                    </span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => {
-                      const nextStatus =
-                        activeBookingForConfirmation.status === 'scheduled'
-                          ? 'open'
-                          : 'scheduled';
-                      setSelectedBookingRecord({
-                        ...activeBookingForConfirmation,
-                        status: nextStatus,
-                      });
-                      setCurrentScreen('booking_confirmation');
+                      setCurrentScreen('delivery_location');
+                      const nextFallback = !manualAddressFallbackMode;
+                      setManualAddressFallbackMode(nextFallback);
+                      setLocationCaptureSource(nextFallback ? 'manual_only' : 'map_pin');
+                      if (!nextFallback && !selectedMapPin) {
+                        setSelectedMapPin(mapCenter);
+                      }
                       showToast(
-                        nextStatus === 'scheduled'
-                          ? 'Previewing Confirmed Appointment state (status: scheduled).'
-                          : 'Previewing Submitted Request state (status: open — unconfirmed).'
+                        nextFallback
+                          ? 'Switched Screen 26 to Manual Address Fallback (no map coordinates required).'
+                          : 'Switched Screen 26 to OpenStreetMap Pin Selector.'
                       );
                     }}
                     className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer"
                   >
                     <div>
                       <div className="font-semibold text-slate-200">
-                        03. Compare Submitted vs Confirmed State
+                        03. Toggle OpenStreetMap vs Manual Fallback
                       </div>
                       <div className="text-[11px] text-slate-400">
-                        Toggles Screen 24 between Open Request &amp; Confirmed Slot
+                        Verifies Screen 26 saves with or without map coordinates
                       </div>
                     </div>
-                    <span className="text-[10.5px] font-mono text-teal-400 shrink-0">
-                      {activeBookingForConfirmation.status === 'scheduled'
-                        ? 'Scheduled'
-                        : 'Open'}
+                    <span className="text-[10.5px] font-mono text-amber-400 shrink-0">
+                      {manualAddressFallbackMode ? 'Manual' : 'OSM Pin'}
                     </span>
                   </button>
                 </div>
@@ -6479,12 +8799,14 @@ class OrderDetailViewScreen extends StatelessWidget {
               {/* Firestore & Security Rules Notes */}
               <div className="bg-slate-950/60 border border-slate-800/80 rounded-2xl p-4 text-xs space-y-1.5">
                 <div className="font-semibold text-teal-400">
-                  Zero-Trust Service Booking Rules
+                  Zero-Trust FCM &amp; Location Rules
                 </div>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Customer writes to <code>/service_requests</code> enforce{' '}
-                  <code>status == &apos;open&apos;</code> and atomic PII isolation in{' '}
-                  <code>private_details/contact</code>. Customers cannot self-confirm appointments.
+                  Clients cannot forge <code>/notifications</code>; recipients may only transition{' '}
+                  <code>isRead: false -&gt; true</code>. Device tokens in{' '}
+                  <code>/users/&#123;uid&#125;/fcm_tokens</code> disallow listing, and{' '}
+                  <code>delivery_addresses</code> enforce{' '}
+                  <code>addressVerificationStatus == &apos;unverified_manual_entry&apos;</code>.
                 </p>
               </div>
             </div>
@@ -6498,14 +8820,28 @@ class OrderDetailViewScreen extends StatelessWidget {
             <div className="w-full md:w-80 border-r border-slate-800 bg-slate-900/50 p-4 overflow-y-auto space-y-4">
               <div className="space-y-1.5">
                 <div className="text-[11px] font-semibold text-slate-400">Flutter Segment</div>
-                <div className="grid grid-cols-3 gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800 text-[11px]">
+                <div className="grid grid-cols-2 gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSegmentCodeTab('segment11');
+                      setSelectedCodeFile('notifications_screen.dart');
+                    }}
+                    className={`py-1.5 rounded font-semibold cursor-pointer whitespace-nowrap ${
+                      segmentCodeTab === 'segment11'
+                        ? 'bg-teal-500 text-slate-950'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Seg 11 (25–26)
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
                       setSegmentCodeTab('segment10');
                       setSelectedCodeFile('service_booking_screen.dart');
                     }}
-                    className={`py-1.5 rounded font-semibold cursor-pointer ${
+                    className={`py-1.5 rounded font-semibold cursor-pointer whitespace-nowrap ${
                       segmentCodeTab === 'segment10'
                         ? 'bg-teal-500 text-slate-950'
                         : 'text-slate-400 hover:text-slate-200'
@@ -6519,7 +8855,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                       setSegmentCodeTab('segment9');
                       setSelectedCodeFile('bulk_order_cart_screen.dart');
                     }}
-                    className={`py-1.5 rounded font-semibold cursor-pointer ${
+                    className={`py-1.5 rounded font-semibold cursor-pointer whitespace-nowrap ${
                       segmentCodeTab === 'segment9'
                         ? 'bg-teal-500 text-slate-950'
                         : 'text-slate-400 hover:text-slate-200'
@@ -6533,7 +8869,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                       setSegmentCodeTab('segment8');
                       setSelectedCodeFile('dealer_home_screen.dart');
                     }}
-                    className={`py-1.5 rounded font-semibold cursor-pointer ${
+                    className={`py-1.5 rounded font-semibold cursor-pointer whitespace-nowrap ${
                       segmentCodeTab === 'segment8'
                         ? 'bg-teal-500 text-slate-950'
                         : 'text-slate-400 hover:text-slate-200'
@@ -6546,7 +8882,9 @@ class OrderDetailViewScreen extends StatelessWidget {
 
               <div>
                 <h3 className="text-xs font-semibold text-slate-300 mb-2">
-                  {segmentCodeTab === 'segment10'
+                  {segmentCodeTab === 'segment11'
+                    ? 'Screens 25 & 26 Dart + Backend Files'
+                    : segmentCodeTab === 'segment10'
                     ? 'Screens 23 & 24 Dart Files'
                     : segmentCodeTab === 'segment9'
                     ? 'Screens 17 & 18 Dart Files'
@@ -6611,71 +8949,74 @@ class OrderDetailViewScreen extends StatelessWidget {
           <div className="flex-1 p-8 overflow-y-auto max-w-4xl mx-auto space-y-6">
             <div>
               <h2 className="text-xl font-bold text-white">
-                Screens 23 &amp; 24 — Service Booking &amp; Confirmation Testing Guide
+                Califnco Full-System QA, Security &amp; Deployment Reference
               </h2>
               <p className="text-sm text-slate-400 mt-1">
-                End-to-end verification steps for Flutter mobile service booking, schedule slot
-                gating, Cloud Firestore persistence, and appointment status distinction.
+                End-to-end verification procedures for Customer E-Commerce, Dealer B2B Wholesale,
+                Service Booking, FCM Notifications, OpenStreetMap Delivery Location, and Admin Operations.
               </p>
             </div>
 
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 space-y-2.5 text-xs text-slate-300 leading-relaxed">
               <h3 className="text-sm font-semibold text-teal-400">
-                01. Verify Unconfigured vs. Configured Scheduling System (Screen 23)
+                01. Storefront, Cart Math &amp; Honest Payment Status Verification (Screens 2–12)
               </h3>
               <p>
-                By default, no active schedule document exists in{' '}
-                <code>/service_schedules/&#123;dateIso&#125;_&#123;postalCode&#125;</code>. Confirm
-                that Screen 23 hides time-slot chips and displays an explicit disclosure that a
-                coordinator will call to confirm availability. Next, click{' '}
-                <strong>01. Toggle Configured Scheduling System</strong> in the right-hand panel:
-                configured slots (<code>09:30 AM - 11:30 AM</code>,{' '}
-                <code>01:00 PM - 03:00 PM</code>, <code>04:00 PM - 06:00 PM</code>) appear as
-                optional preferences while still clearly stating they are not confirmed until
-                dispatch review.
+                Test role-aware sign-in on <strong>Screen 2 (Login)</strong>: Customer routes to{' '}
+                <strong>Home</strong>, while Dealer Partner routes directly to{' '}
+                <strong>Dealer Hub</strong>. In <strong>Water Catalog (Screen 6)</strong>, filter by
+                category, search by keyword, sort by price/rating, inspect specifications &amp; zoom
+                studio product imagery on <strong>Screen 7</strong>, and adjust quantities in{' '}
+                <strong>Cart (Screen 8)</strong>. On <strong>Checkout (Screen 9)</strong>, COD orders
+                save atomically to Cloud Firestore <code>/orders</code> when signed in, while client
+                Razorpay test checkouts are explicitly labeled <strong>Payment Unverified</strong>{' '}
+                until a server-side <code>RAZORPAY_KEY_SECRET</code> webhook is configured.
               </p>
             </div>
 
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 space-y-2.5 text-xs text-slate-300 leading-relaxed">
               <h3 className="text-sm font-semibold text-teal-400">
-                02. Test Form Validation &amp; Live Cloud Firestore Write
+                02. Dealer Approval &amp; Service Desk Workflows (Pages 21–22 &amp; Screens 15–18, 23–24)
               </h3>
               <p>
-                Click <strong>Connect Google Auth</strong> in the top bar, choose{' '}
-                <strong>Installation</strong>, <strong>Maintenance</strong>, or{' '}
-                <strong>Repair</strong>, select an applicable Califnco product, enter an issue
-                description (10–600 chars), verify your service address &amp; 10-digit phone number,
-                and tap <strong>Submit Request</strong>. The app executes an atomic Firestore{' '}
-                <code>WriteBatch</code> creating both{' '}
-                <code>/service_requests/&#123;requestId&#125;</code> (with{' '}
-                <code>status: &apos;open&apos;</code>) and isolated PII in{' '}
-                <code>/service_requests/&#123;requestId&#125;/private_details/contact</code>.
+                Pending or rejected dealers are blocked from wholesale pricing and bulk PO checkout in
+                both the mobile app and <code>firestore.rules</code> (<code>isApprovedDealerUser()</code>).
+                Service requests submitted on <strong>Screen 23</strong> save as{' '}
+                <code>status: open</code> (unconfirmed) and only transition to a confirmed appointment
+                when scheduled by an administrator on <strong>Admin Console → Service Desk (Page 22)</strong>,
+                which atomically emits a trusted <code>service_scheduled</code> notification.
               </p>
             </div>
 
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 space-y-2.5 text-xs text-slate-300 leading-relaxed">
               <h3 className="text-sm font-semibold text-teal-400">
-                03. Verify Submitted Request vs. Confirmed Appointment (Screen 24 &amp; Admin Desk)
+                03. Notifications (FCM) &amp; OpenStreetMap Delivery Location (Screens 25–26)
               </h3>
               <p>
-                After submitting, Screen 24 displays your reference (<code>SRV-2026-XXXX</code>) as{' '}
-                <strong>Request Submitted — Appointment Not Yet Confirmed</strong>. Open{' '}
-                <strong>Admin Console → Service Desk (Page 22)</strong>, locate your newly created
-                ticket, and transition its status from <code>open</code> to <code>scheduled</code>.
-                Return to Screen 24 (or tap <strong>View My Requests</strong>) to observe the live
-                stream update to <strong>Confirmed Technician Appointment</strong>.
+                <strong>Screen 25</strong> streams trusted <code>/notifications</code> records,
+                distinguishes foreground banners from background OS tray delivery, isolates tokens in{' '}
+                <code>/users/&#123;uid&#125;/fcm_tokens/&#123;deviceId&#125;</code>, and never
+                fabricates push delivery. <strong>Screen 26</strong> pairs interactive OpenStreetMap
+                pin selection with a full manual address fallback while keeping{' '}
+                <code>addressVerificationStatus: unverified_manual_entry</code> unless verified by a
+                postal backend.
               </p>
             </div>
 
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 space-y-2 text-xs text-slate-300">
               <h3 className="text-sm font-semibold text-teal-400">
-                04. Running the Flutter Dart Implementation Locally
+                04. Flutter Run, APK Build &amp; Security Rules Test Commands
               </h3>
               <pre className="p-3 bg-slate-900 rounded-xl font-mono text-[11px] text-slate-300 overflow-x-auto">
-{`flutter pub get
-flutter analyze lib/features/service lib/core/router/service_router_routes.dart
-flutter test
-flutter run --dart-define=FIREBASE_DATABASE_ID=ai-studio-califnco-446b2980-82d0-4b7d-a0e2-2bbecc22b94c`}
+{`# Run Flutter mobile app & build release Android APK
+flutter pub get
+flutter analyze
+flutter run --dart-define=FIREBASE_DATABASE_ID=ai-studio-califnco-446b2980-82d0-4b7d-a0e2-2bbecc22b94c
+flutter build apk --release --dart-define=FIREBASE_DATABASE_ID=ai-studio-califnco-446b2980-82d0-4b7d-a0e2-2bbecc22b94c
+
+# Validate Admin React + TypeScript bundle & Firestore Security Rules
+npm run lint && npm run build
+npx eslint firestore.rules && npx vitest run`}
               </pre>
             </div>
           </div>

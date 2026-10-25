@@ -84,6 +84,17 @@ export const DealerApprovalPage: React.FC<DealerApprovalPageProps> = ({
   const [decisionError, setDecisionError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!selectedDealerId) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSelectedDealerId(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedDealerId]);
+
+  useEffect(() => {
     setStatusFilter(initialFilter);
   }, [initialFilter]);
 
@@ -585,8 +596,12 @@ export const DealerApprovalPage: React.FC<DealerApprovalPageProps> = ({
           role="dialog"
           aria-modal="true"
           aria-labelledby="dealer-review-drawer-title"
+          onClick={() => setSelectedDealerId(null)}
         >
-          <div className="w-full max-w-2xl bg-white h-full overflow-y-auto shadow-xl border-l border-slate-200 flex flex-col justify-between">
+          <div
+            className="w-full max-w-2xl bg-white h-full overflow-y-auto shadow-xl border-l border-slate-200 flex flex-col justify-between"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div>
               {/* Drawer Header */}
               <div className="px-6 py-5 border-b border-slate-200 flex items-start justify-between gap-4 sticky top-0 bg-white z-10">
@@ -609,7 +624,7 @@ export const DealerApprovalPage: React.FC<DealerApprovalPageProps> = ({
                   type="button"
                   onClick={() => setSelectedDealerId(null)}
                   aria-label="Close dealer review panel"
-                  className="p-2 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
+                  className="min-w-[40px] min-h-[40px] inline-flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
                 >
                   <X className="w-5 h-5" />
                 </button>

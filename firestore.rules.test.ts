@@ -468,17 +468,21 @@ describe('Califnco Hardened Firestore Security Rules — Structural, Dealer Appr
     expect(rulesSource).toContain("existsAfter(/databases/$(database)/documents/dealers/$(dealerId)/application_details/review)");
     expect(rulesSource).toContain("existsAfter(/databases/$(database)/documents/service_requests/$(requestId)/private_details/contact)");
 
-    // Verify zero get() or exists() calls inside allow list blocks across all 9 match blocks
+    // Verify zero get() or exists() calls inside allow list blocks across all 12 match blocks
     const listLines = rulesSource
       .split('\n')
       .filter((line) => line.trim().startsWith('allow list:'));
-    expect(listLines.length).toBe(9);
+    expect(listLines.length).toBe(12);
     for (const line of listLines) {
       expect(line).not.toContain('get(');
       expect(line).not.toContain('exists(');
     }
     expect(rulesSource).toContain('match /service_schedules/{scheduleId}');
     expect(rulesSource).toContain("incoming().orderId == 'DIRECT-SERVICE'");
+    expect(rulesSource).toContain('match /notifications/{notificationId}');
+    expect(rulesSource).toContain('match /fcm_tokens/{deviceId}');
+    expect(rulesSource).toContain('match /delivery_addresses/{addressId}');
+    expect(rulesSource).toContain("incoming().addressVerificationStatus == 'unverified_manual_entry'");
   });
 
   it('Dirty Dozen #1 & #2: blocks non-admin escalation and unverified email spoofing', () => {
@@ -822,6 +826,239 @@ describe('Califnco Hardened Firestore Security Rules — Structural, Dealer Appr
     // Non-admin cannot publish or tamper with /service_schedules/{scheduleId}
     expect(evaluateIsAdmin(regularCustomer, new Set())).toBe(false);
     expect(evaluateIsAdmin(adminAuth, new Set())).toBe(true);
+  });
+
+  it('Screen 25 Security #15, #16, #17: blocks client-forged notifications, blocks message tampering on mark-as-read, and isolates FCM tokens', () => {
+    function evaluateNotificationCreate(params: {
+      auth: SimAuth | null;
+      adminRegistry: Set<string>;
+      notificationId: string;
+      incoming: Record<string, unknown>;
+      requestTime: number;
+    }): 'ALLOW' | 'PERMISSION_DENIED' {
+      const { auth, adminRegistry, notificationId, incoming, requestTime } = params;
+      if (!auth || auth.email_verified !== true) return 'PERMISSION_DENIED';
+      if (!evaluateValidId(notificationId)) return 'PERMISSION_DENIED';
+      if (!evaluateIsAdmin(auth, adminRegistry)) return 'PERMISSION_DENIED';
+      if (incoming.isRead !== false || 'readAt' in incoming) return 'PERMISSION_DENIED';
+      if (incoming.createdByUid !== auth.uid) return 'PERMISSION_DENIED';
+      if (incoming.createdAt !== requestTime || incoming.updatedAt !== requestTime) {
+        return 'PERMISSION_DENIED';
+      }
+      return 'ALLOW';
+    }
+
+    function evaluateNotificationMarkRead(params: {
+      auth: SimAuth | null;
+      notificationId: string;
+      existing: Record<string, unknown>;
+      incoming: Record<string, unknown>;
+      requestTime: number;
+    }): 'ALLOW' | 'PERMISSION_DENIED' {
+      const { auth, notificationId, existing, incoming, requestTime } = params;
+      if (!auth || auth.email_verified !== true) return 'PERMISSION_DENIED';
+      if (!evaluateValidId(notificationId)) return 'PERMISSION_DENIED';
+      if (existing.recipientUid !== auth.uid) return 'PERMISSION_DENIED';
+      if (existing.isRead !== false || incoming.isRead !== true) return 'PERMISSION_DENIED';
+      if (incoming.readAt !== requestTime || incoming.updatedAt !== requestTime) {
+        return 'PERMISSION_DENIED';
+      }
+      const changedKeys = Object.keys(incoming).filter((k) => incoming[k] !== existing[k]);
+      if (!changedKeys.every((k) => ['isRead', 'readAt', 'updatedAt'].includes(k))) {
+        return 'PERMISSION_DENIED';
+      }
+      return 'ALLOW';
+    }
+
+    const baseNotification: Record<string, unknown> = {
+      recipientUid: regularCustomer.uid,
+      title: 'Order #ORD-2026-8841 Dispatched',
+      body: 'Your Califnco Hydra Pure Elite RO system has been handed over to logistics.',
+      eventType: 'order_dispatched',
+      orderId: 'ord_1001',
+      orderNumber: 'ORD-2026-8841',
+      source: 'trusted_backend_order_event',
+      isRead: false,
+      createdAtIso: '2026-10-25T09:00:00.000Z',
+      createdByUid: adminAuth.uid,
+      createdAt: SERVER_NOW,
+      updatedAt: SERVER_NOW,
+    };
+
+    // #15: Non-admin customer attempting to fabricate an order notification -> PERMISSION_DENIED
+    expect(
+      evaluateNotificationCreate({
+        auth: regularCustomer,
+        adminRegistry: new Set(),
+        notificationId: 'notif_fake_1',
+        incoming: { ...baseNotification, createdByUid: regularCustomer.uid },
+        requestTime: SERVER_NOW,
+      })
+    ).toBe('PERMISSION_DENIED');
+
+    // Trusted admin/backend event creating unread notification -> ALLOW
+    expect(
+      evaluateNotificationCreate({
+        auth: adminAuth,
+        adminRegistry: new Set(),
+        notificationId: 'notif_valid_1',
+        incoming: baseNotification,
+        requestTime: SERVER_NOW,
+      })
+    ).toBe('ALLOW');
+
+    // #16: Recipient attempting to alter title/body while marking read -> PERMISSION_DENIED
+    expect(
+      evaluateNotificationMarkRead({
+        auth: regularCustomer,
+        notificationId: 'notif_valid_1',
+        existing: baseNotification,
+        incoming: {
+          ...baseNotification,
+          title: 'Forged Free Refund Approved',
+          isRead: true,
+          readAt: SERVER_NOW + 5000,
+          updatedAt: SERVER_NOW + 5000,
+        },
+        requestTime: SERVER_NOW + 5000,
+      })
+    ).toBe('PERMISSION_DENIED');
+
+    // Legitimate mark-as-read by owner -> ALLOW
+    expect(
+      evaluateNotificationMarkRead({
+        auth: regularCustomer,
+        notificationId: 'notif_valid_1',
+        existing: baseNotification,
+        incoming: {
+          ...baseNotification,
+          isRead: true,
+          readAt: SERVER_NOW + 5000,
+          updatedAt: SERVER_NOW + 5000,
+        },
+        requestTime: SERVER_NOW + 5000,
+      })
+    ).toBe('ALLOW');
+
+    // #17: Cross-user FCM token access blocked & allow list: if false enforced
+    expect(dealerApplicant.uid === regularCustomer.uid).toBe(false);
+    expect(rulesSource).toContain('match /fcm_tokens/{deviceId} {\n        allow get: if isVerifiedUser() &&\n          isValidId(userId) &&\n          isValidId(deviceId) &&\n          request.auth.uid == userId;\n\n        allow list: if false;');
+  });
+
+  it('Screen 26 Security #18: blocks forged verified postal address status and enforces coordinate consistency', () => {
+    function evaluateDeliveryAddressCreate(params: {
+      auth: SimAuth | null;
+      userId: string;
+      addressId: string;
+      incoming: Record<string, unknown>;
+      requestTime: number;
+    }): 'ALLOW' | 'PERMISSION_DENIED' {
+      const { auth, userId, addressId, incoming, requestTime } = params;
+      if (!auth || auth.email_verified !== true) return 'PERMISSION_DENIED';
+      if (!evaluateValidId(userId) || !evaluateValidId(addressId)) return 'PERMISSION_DENIED';
+      if (auth.uid !== userId) return 'PERMISSION_DENIED';
+      if (incoming.userId !== userId || incoming.addressId !== addressId) return 'PERMISSION_DENIED';
+      if (incoming.addressVerificationStatus !== 'unverified_manual_entry') {
+        return 'PERMISSION_DENIED';
+      }
+      const lat = incoming.latitude as number;
+      const lng = incoming.longitude as number;
+      if (typeof lat !== 'number' || lat < -90 || lat > 90) return 'PERMISSION_DENIED';
+      if (typeof lng !== 'number' || lng < -180 || lng > 180) return 'PERMISSION_DENIED';
+      if (
+        incoming.hasCoordinates === false &&
+        (incoming.locationSource !== 'manual_only' || lat !== 0 || lng !== 0)
+      ) {
+        return 'PERMISSION_DENIED';
+      }
+      if (
+        incoming.hasCoordinates === true &&
+        !['map_pin', 'gps_pin'].includes(String(incoming.locationSource))
+      ) {
+        return 'PERMISSION_DENIED';
+      }
+      if (incoming.createdAt !== requestTime || incoming.updatedAt !== requestTime) {
+        return 'PERMISSION_DENIED';
+      }
+      return 'ALLOW';
+    }
+
+    const validMapPinAddress: Record<string, unknown> = {
+      addressId: 'addr_101',
+      userId: regularCustomer.uid,
+      label: 'Home',
+      recipientName: 'Sarah Jenkins',
+      phone: '+91 98765 43210',
+      streetAddress: 'Flat 402, Green Park Avenue, Link Road',
+      landmark: 'Near Bandra Talao',
+      city: 'Mumbai',
+      state: 'Maharashtra',
+      postalCode: '400050',
+      deliveryInstructions: 'Call security desk on arrival',
+      isDefault: true,
+      hasCoordinates: true,
+      latitude: 19.0596,
+      longitude: 72.8295,
+      locationSource: 'map_pin',
+      addressVerificationStatus: 'unverified_manual_entry',
+      createdAtIso: '2026-10-25T09:15:00.000Z',
+      createdAt: SERVER_NOW,
+      updatedAt: SERVER_NOW,
+    };
+
+    // #18: Client claiming a map coordinate produced a backend-verified postal address -> PERMISSION_DENIED
+    expect(
+      evaluateDeliveryAddressCreate({
+        auth: regularCustomer,
+        userId: regularCustomer.uid,
+        addressId: 'addr_101',
+        incoming: {
+          ...validMapPinAddress,
+          addressVerificationStatus: 'postal_verified_backend',
+        },
+        requestTime: SERVER_NOW,
+      })
+    ).toBe('PERMISSION_DENIED');
+
+    // Out-of-bounds latitude -> PERMISSION_DENIED
+    expect(
+      evaluateDeliveryAddressCreate({
+        auth: regularCustomer,
+        userId: regularCustomer.uid,
+        addressId: 'addr_101',
+        incoming: { ...validMapPinAddress, latitude: 145.0 },
+        requestTime: SERVER_NOW,
+      })
+    ).toBe('PERMISSION_DENIED');
+
+    // Valid map-pin address with explicit unverified_manual_entry -> ALLOW
+    expect(
+      evaluateDeliveryAddressCreate({
+        auth: regularCustomer,
+        userId: regularCustomer.uid,
+        addressId: 'addr_101',
+        incoming: validMapPinAddress,
+        requestTime: SERVER_NOW,
+      })
+    ).toBe('ALLOW');
+
+    // Valid manual-only fallback address without map coordinates -> ALLOW
+    expect(
+      evaluateDeliveryAddressCreate({
+        auth: regularCustomer,
+        userId: regularCustomer.uid,
+        addressId: 'addr_102',
+        incoming: {
+          ...validMapPinAddress,
+          addressId: 'addr_102',
+          hasCoordinates: false,
+          latitude: 0,
+          longitude: 0,
+          locationSource: 'manual_only',
+        },
+        requestTime: SERVER_NOW,
+      })
+    ).toBe('ALLOW');
   });
 });
 

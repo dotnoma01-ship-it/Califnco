@@ -99,9 +99,9 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
             <button
               type="button"
               onClick={onOpenMobileStudio}
-              className="mt-3 w-full px-4 py-2 text-xs font-semibold text-teal-700 hover:text-teal-900 underline cursor-pointer"
+              className="mt-3 w-full min-h-[40px] px-4 py-2 text-xs font-semibold text-teal-700 hover:text-teal-900 underline cursor-pointer"
             >
-              Return to Califnco Mobile App Studio (Screens 23–24)
+              Return to Califnco Mobile App Studio
             </button>
           )}
         </div>

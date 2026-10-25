@@ -263,7 +263,104 @@ service cloud.firestore {
           data.availableSlots.size() == 0 ||
           (data.availableSlots[0] is string && data.availableSlots[0].size() >= 3 && data.availableSlots[0].size() <= 40)
         ) &&
-        data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 && data.updatedByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 && data.updatedByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserNotification(data) {
+      return data.keys().hasAll([
+          'recipientUid', 'title', 'body', 'eventType', 'source',
+          'isRead', 'createdAtIso', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'recipientUid', 'title', 'body', 'eventType', 'orderId', 'orderNumber',
+          'source', 'isRead', 'createdAtIso', 'readAt', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.recipientUid is string && data.recipientUid.size() >= 1 && data.recipientUid.size() <= 128 && data.recipientUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.title is string && data.title.size() >= 3 && data.title.size() <= 140 &&
+        data.body is string && data.body.size() >= 5 && data.body.size() <= 500 &&
+        data.eventType is string && data.eventType.size() <= 32 && data.eventType in [
+          'order_confirmed',
+          'order_processing',
+          'order_dispatched',
+          'order_delivered',
+          'order_cancelled',
+          'payment_settled',
+          'service_scheduled',
+          'system_notice'
+        ] &&
+        (!('orderId' in data) || (data.orderId is string && data.orderId.size() <= 128 && (data.orderId == '' || data.orderId.matches('^[a-zA-Z0-9_\\-]+$')))) &&
+        (!('orderNumber' in data) || (data.orderNumber is string && data.orderNumber.size() <= 40 && (data.orderNumber == '' || data.orderNumber.matches('^[A-Z0-9\\-]+$')))) &&
+        data.source is string && data.source.size() <= 40 && data.source in [
+          'trusted_backend_order_event',
+          'trusted_admin_console_event',
+          'fcm_remote_sync'
+        ] &&
+        data.isRead is bool &&
+        data.createdAtIso is string && data.createdAtIso.size() >= 10 && data.createdAtIso.size() <= 40 &&
+        (!('readAt' in data) || (data.readAt is timestamp)) &&
+        data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128 && data.createdByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDevicePushToken(data) {
+      return data.keys().hasAll([
+          'userId', 'deviceId', 'fcmToken', 'platform',
+          'permissionStatus', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'userId', 'deviceId', 'fcmToken', 'platform',
+          'permissionStatus', 'createdAt', 'updatedAt'
+        ]) &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.deviceId is string && data.deviceId.size() >= 8 && data.deviceId.size() <= 128 && data.deviceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.fcmToken is string && data.fcmToken.size() >= 20 && data.fcmToken.size() <= 4096 &&
+        data.platform is string && data.platform.size() <= 16 && data.platform in ['android', 'ios', 'web'] &&
+        data.permissionStatus is string && data.permissionStatus.size() <= 20 && data.permissionStatus in ['authorized', 'provisional'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserDeliveryAddress(data) {
+      return data.keys().hasAll([
+          'addressId', 'userId', 'label', 'recipientName', 'phone',
+          'streetAddress', 'landmark', 'city', 'state', 'postalCode',
+          'deliveryInstructions', 'isDefault', 'hasCoordinates',
+          'latitude', 'longitude', 'locationSource',
+          'addressVerificationStatus', 'createdAtIso', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'addressId', 'userId', 'label', 'recipientName', 'phone',
+          'streetAddress', 'landmark', 'city', 'state', 'postalCode',
+          'deliveryInstructions', 'isDefault', 'hasCoordinates',
+          'latitude', 'longitude', 'locationSource',
+          'addressVerificationStatus', 'createdAtIso', 'createdAt', 'updatedAt'
+        ]) &&
+        data.addressId is string && data.addressId.size() >= 1 && data.addressId.size() <= 128 && data.addressId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.label is string && data.label.size() <= 16 && data.label in ['Home', 'Work', 'Other'] &&
+        data.recipientName is string && data.recipientName.size() >= 2 && data.recipientName.size() <= 120 &&
+        data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 24 &&
+        data.streetAddress is string && data.streetAddress.size() >= 5 && data.streetAddress.size() <= 240 &&
+        data.landmark is string && data.landmark.size() <= 140 &&
+        data.city is string && data.city.size() >= 2 && data.city.size() <= 80 &&
+        data.state is string && data.state.size() >= 2 && data.state.size() <= 80 &&
+        data.postalCode is string && data.postalCode.size() >= 4 && data.postalCode.size() <= 16 && data.postalCode.matches('^[0-9A-Za-z\\- ]+$') &&
+        data.deliveryInstructions is string && data.deliveryInstructions.size() <= 240 &&
+        data.isDefault is bool &&
+        data.hasCoordinates is bool &&
+        data.latitude is number && data.latitude >= -90 && data.latitude <= 90 &&
+        data.longitude is number && data.longitude >= -180 && data.longitude <= 180 &&
+        data.locationSource is string && data.locationSource.size() <= 24 && data.locationSource in ['map_pin', 'gps_pin', 'manual_only'] &&
+        (
+          (data.hasCoordinates == false && data.locationSource == 'manual_only' && data.latitude == 0 && data.longitude == 0) ||
+          (data.hasCoordinates == true && data.locationSource in ['map_pin', 'gps_pin'])
+        ) &&
+        data.addressVerificationStatus is string && data.addressVerificationStatus.size() <= 32 &&
+        data.addressVerificationStatus in ['unverified_manual_entry', 'postal_verified_backend'] &&
+        data.createdAtIso is string && data.createdAtIso.size() >= 10 && data.createdAtIso.size() <= 40 &&
+        data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
 
@@ -421,6 +518,31 @@ service cloud.firestore {
         incoming().diff(existing()).affectedKeys().hasOnly([
           'status', 'scheduledDateIso', 'resolutionNotes', 'updatedByUid', 'updatedAt'
         ]);
+    }
+
+    // =========================================================================
+    // Notification Mark-As-Read State Machine Helpers (Screen 25)
+    // =========================================================================
+    function isNotificationImmutableCoreUnchanged() {
+      return incoming().recipientUid == existing().recipientUid &&
+        incoming().title == existing().title &&
+        incoming().body == existing().body &&
+        incoming().eventType == existing().eventType &&
+        incoming().source == existing().source &&
+        incoming().createdAtIso == existing().createdAtIso &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        (!('orderId' in existing()) || incoming().orderId == existing().orderId) &&
+        (!('orderNumber' in existing()) || incoming().orderNumber == existing().orderNumber);
+    }
+
+    function isMarkNotificationReadAction() {
+      return existing().isRead == false &&
+        incoming().isRead == true &&
+        isNotificationImmutableCoreUnchanged() &&
+        'readAt' in incoming() && incoming().readAt == request.time &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'readAt', 'updatedAt']);
     }
 
     // =========================================================================
@@ -742,6 +864,125 @@ service cloud.firestore {
         isAdmin();
 
       allow delete: if isVerifiedUser() && isValidId(scheduleId) && isAdmin();
+    }
+
+    // =========================================================================
+    // Collection 6: /notifications/{notificationId}
+    // Trusted Backend Order & Service Notifications (Screen 25)
+    // =========================================================================
+    match /notifications/{notificationId} {
+      allow get: if isVerifiedUser() &&
+        isValidId(notificationId) &&
+        (existing().recipientUid == request.auth.uid || isAdmin());
+
+      allow list: if isBootstrappedAdmin() ||
+        (isVerifiedUser() && resource.data.recipientUid == request.auth.uid);
+
+      allow create: if isVerifiedUser() &&
+        isValidId(notificationId) &&
+        isValidUserNotification(incoming()) &&
+        incoming().isRead == false &&
+        !('readAt' in incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+
+      allow update: if isVerifiedUser() &&
+        isValidId(notificationId) &&
+        isValidUserNotification(incoming()) &&
+        existing().recipientUid == request.auth.uid &&
+        isMarkNotificationReadAction();
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // Collection 7 & 8: /users/{userId}/fcm_tokens & /users/{userId}/delivery_addresses
+    // Owner-Isolated Push Tokens (Screen 25) & Delivery Locations (Screen 26)
+    // =========================================================================
+    match /users/{userId} {
+      match /fcm_tokens/{deviceId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(deviceId) &&
+          request.auth.uid == userId;
+
+        allow list: if false;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(deviceId) &&
+          request.auth.uid == userId &&
+          isValidDevicePushToken(incoming()) &&
+          incoming().userId == userId &&
+          incoming().deviceId == deviceId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(deviceId) &&
+          request.auth.uid == userId &&
+          isValidDevicePushToken(incoming()) &&
+          incoming().userId == existing().userId &&
+          incoming().deviceId == existing().deviceId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'fcmToken', 'platform', 'permissionStatus', 'updatedAt'
+          ]);
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(deviceId) &&
+          request.auth.uid == userId;
+      }
+
+      match /delivery_addresses/{addressId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(addressId) &&
+          request.auth.uid == userId;
+
+        allow list: if isVerifiedUser() &&
+          request.auth.uid == userId &&
+          resource.data.userId == request.auth.uid;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(addressId) &&
+          request.auth.uid == userId &&
+          isValidUserDeliveryAddress(incoming()) &&
+          incoming().userId == userId &&
+          incoming().addressId == addressId &&
+          incoming().addressVerificationStatus == 'unverified_manual_entry' &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(addressId) &&
+          request.auth.uid == userId &&
+          isValidUserDeliveryAddress(incoming()) &&
+          incoming().userId == existing().userId &&
+          incoming().addressId == existing().addressId &&
+          incoming().createdAtIso == existing().createdAtIso &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().addressVerificationStatus == 'unverified_manual_entry' &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'label', 'recipientName', 'phone', 'streetAddress', 'landmark',
+            'city', 'state', 'postalCode', 'deliveryInstructions', 'isDefault',
+            'hasCoordinates', 'latitude', 'longitude', 'locationSource',
+            'addressVerificationStatus', 'updatedAt'
+          ]);
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(userId) &&
+          isValidId(addressId) &&
+          request.auth.uid == userId;
+      }
     }
   }
 }

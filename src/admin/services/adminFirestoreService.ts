@@ -23,6 +23,7 @@ import {
   SEED_SERVICE_PRIVATE_CONTACTS,
 } from '../demoData';
 import {
+  auth,
   BOOTSTRAPPED_ADMIN_EMAIL,
   db,
   handleFirestoreError,
@@ -346,9 +347,68 @@ export async function fetchOrderInspectionDetails(orderId: string): Promise<{
   return { items, privateDetails };
 }
 
+function buildTrustedOrderTransitionNotification(
+  order: OrderSummary,
+  nextFulfilment?: FulfilmentStatus,
+  paymentSettled?: boolean
+): {
+  eventType:
+    | 'order_confirmed'
+    | 'order_processing'
+    | 'order_dispatched'
+    | 'order_delivered'
+    | 'order_cancelled'
+    | 'payment_settled';
+  title: string;
+  body: string;
+} | null {
+  if (paymentSettled) {
+    return {
+      eventType: 'payment_settled',
+      title: `Payment Settled for ${order.orderNumber}`,
+      body: `Payment for Califnco order ${order.orderNumber} has been verified and recorded by administration.`,
+    };
+  }
+  switch (nextFulfilment) {
+    case 'confirmed':
+      return {
+        eventType: 'order_confirmed',
+        title: `Order ${order.orderNumber} Confirmed`,
+        body: `Your Califnco order ${order.orderNumber} has been verified and queued for warehouse inspection.`,
+      };
+    case 'processing':
+      return {
+        eventType: 'order_processing',
+        title: `Preparing Order ${order.orderNumber}`,
+        body: `Specialists are testing and packaging your water purification equipment for ${order.orderNumber}.`,
+      };
+    case 'dispatched':
+      return {
+        eventType: 'order_dispatched',
+        title: `Order ${order.orderNumber} Dispatched`,
+        body: `Shipment ${order.orderNumber} has departed Califnco Logistics for ${order.regionCity}.`,
+      };
+    case 'delivered':
+      return {
+        eventType: 'order_delivered',
+        title: `Order ${order.orderNumber} Delivered`,
+        body: `Order ${order.orderNumber} was delivered in ${order.regionCity}. Book certified installation anytime in Service Booking.`,
+      };
+    case 'cancelled':
+      return {
+        eventType: 'order_cancelled',
+        title: `Order ${order.orderNumber} Cancelled`,
+        body: `Order ${order.orderNumber} has been cancelled. Eligible prepaid balances are queued for refund.`,
+      };
+    default:
+      return null;
+  }
+}
+
 export async function transitionOrderFulfilment(
   order: OrderSummary,
-  nextStatus: FulfilmentStatus
+  nextStatus: FulfilmentStatus,
+  adminUid?: string
 ): Promise<void> {
   assertValidDocId(order.id, 'order');
   const check = validateStatusTransition(order.fulfilmentStatus, nextStatus);
@@ -366,25 +426,94 @@ export async function transitionOrderFulfilment(
     payload.paymentStatus = 'refunded';
   }
 
+  const copy = buildTrustedOrderTransitionNotification(order, nextStatus, false);
+  const validRecipient =
+    order.customerUid &&
+    order.customerUid.length <= VALIDATION_CONSTRAINTS.ID_MAX_LENGTH &&
+    VALIDATION_CONSTRAINTS.ID_PATTERN.test(order.customerUid);
+
+  const effectiveAdminUid = adminUid ?? auth.currentUser?.uid;
   try {
-    await updateDoc(doc(db, 'orders', order.id), payload);
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'orders', order.id), payload);
+
+    if (
+      copy &&
+      validRecipient &&
+      effectiveAdminUid &&
+      VALIDATION_CONSTRAINTS.ID_PATTERN.test(effectiveAdminUid)
+    ) {
+      const notifId = `notif_${Date.now()}_${Math.floor(100 + Math.random() * 900)}`;
+      batch.set(doc(db, 'notifications', notifId), {
+        recipientUid: order.customerUid,
+        title: copy.title.slice(0, 140),
+        body: copy.body.slice(0, 500),
+        eventType: copy.eventType,
+        orderId: order.id,
+        orderNumber: order.orderNumber.slice(0, 40),
+        source: 'trusted_admin_console_event',
+        isRead: false,
+        createdAtIso: new Date().toISOString(),
+        createdByUid: effectiveAdminUid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, orderPath);
   }
 }
 
-export async function settleOrderPayment(order: OrderSummary): Promise<void> {
+export async function settleOrderPayment(
+  order: OrderSummary,
+  adminUid?: string
+): Promise<void> {
   assertValidDocId(order.id, 'order');
   if (!canSettleOrderPayment(order)) {
     throw new Error('Only active orders with COD or Net-30 credit can be marked as paid.');
   }
 
   const orderPath = `orders/${order.id}`;
+  const copy = buildTrustedOrderTransitionNotification(order, undefined, true);
+  const validRecipient =
+    order.customerUid &&
+    order.customerUid.length <= VALIDATION_CONSTRAINTS.ID_MAX_LENGTH &&
+    VALIDATION_CONSTRAINTS.ID_PATTERN.test(order.customerUid);
+  const effectiveAdminUid = adminUid ?? auth.currentUser?.uid;
+
   try {
-    await updateDoc(doc(db, 'orders', order.id), {
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'orders', order.id), {
       paymentStatus: 'paid',
       updatedAt: serverTimestamp(),
     });
+
+    if (
+      copy &&
+      validRecipient &&
+      effectiveAdminUid &&
+      VALIDATION_CONSTRAINTS.ID_PATTERN.test(effectiveAdminUid)
+    ) {
+      const notifId = `notif_${Date.now()}_${Math.floor(100 + Math.random() * 900)}`;
+      batch.set(doc(db, 'notifications', notifId), {
+        recipientUid: order.customerUid,
+        title: copy.title.slice(0, 140),
+        body: copy.body.slice(0, 500),
+        eventType: copy.eventType,
+        orderId: order.id,
+        orderNumber: order.orderNumber.slice(0, 40),
+        source: 'trusted_admin_console_event',
+        isRead: false,
+        createdAtIso: new Date().toISOString(),
+        createdByUid: effectiveAdminUid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, orderPath);
   }
@@ -581,13 +710,55 @@ export async function updateServiceRequestTicket(params: {
 
   const ticketPath = `service_requests/${ticket.id}`;
   try {
-    await updateDoc(doc(db, 'service_requests', ticket.id), {
+    const batch = writeBatch(db);
+    const now = serverTimestamp();
+
+    batch.update(doc(db, 'service_requests', ticket.id), {
       status: nextStatus,
       scheduledDateIso: sanitizedSchedule,
       resolutionNotes: sanitizedNotes,
       updatedByUid: adminUid,
-      updatedAt: serverTimestamp(),
+      updatedAt: now,
     });
+
+    // Emit a trusted customer notification when an appointment slot is confirmed by Service Desk
+    const validRecipient =
+      Boolean(ticket.customerUid) &&
+      ticket.customerUid.length <= VALIDATION_CONSTRAINTS.ID_MAX_LENGTH &&
+      VALIDATION_CONSTRAINTS.ID_PATTERN.test(ticket.customerUid);
+
+    if (ticket.status !== 'scheduled' && nextStatus === 'scheduled' && validRecipient) {
+      const notifId = `notif_srv_${ticket.id}_${Date.now()}`
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 96);
+      const formattedDate = sanitizedSchedule.slice(0, 10);
+      const validOrderId =
+        Boolean(ticket.orderId) &&
+        ticket.orderId.length <= VALIDATION_CONSTRAINTS.ID_MAX_LENGTH &&
+        VALIDATION_CONSTRAINTS.ID_PATTERN.test(ticket.orderId);
+
+      batch.set(doc(db, 'notifications', notifId), {
+        recipientUid: ticket.customerUid,
+        title: `Technician Visit Scheduled (${ticket.ticketNumber})`.slice(0, 140),
+        body: `Your Califnco ${ticket.serviceType} appointment for ${ticket.productModel} is confirmed for ${formattedDate}.`.slice(
+          0,
+          500
+        ),
+        eventType: 'service_scheduled',
+        orderId: validOrderId ? ticket.orderId : 'DIRECT-SERVICE',
+        orderNumber: /^[A-Z0-9-]{5,40}$/.test(ticket.orderNumber)
+          ? ticket.orderNumber
+          : 'DIRECT-SERVICE',
+        source: 'trusted_admin_console_event',
+        isRead: false,
+        createdAtIso: new Date().toISOString(),
+        createdByUid: adminUid,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, ticketPath);
   }
