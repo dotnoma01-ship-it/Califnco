@@ -72,10 +72,10 @@ import {
 } from 'lucide-react';
 
 // Authentic Generated Images
-const IMG_PURIFIER = '/src/assets/images/califnco_purifier_hero_1792781266897.jpg';
-const IMG_DISPENSER = '/src/assets/images/califnco_dispenser_1792782204122.jpg';
-const IMG_FILTERS = '/src/assets/images/califnco_filter_cartridge_1792782204448.jpg';
-const IMG_PUMP = '/src/assets/images/califnco_booster_pump_1792782205142.jpg';
+import IMG_PURIFIER from './assets/images/califnco_purifier_hero_1792781266897.jpg';
+import IMG_DISPENSER from './assets/images/califnco_dispenser_1792782204122.jpg';
+import IMG_FILTERS from './assets/images/califnco_filter_cartridge_1792782204448.jpg';
+import IMG_PUMP from './assets/images/califnco_booster_pump_1792782205142.jpg';
 
 type ScreenId =
   | 'welcome'
@@ -2485,7 +2485,7 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                     <button
                       onClick={() => {
-                        alert(authRole === 'dealer' ? 'Dealer application submitted! Set to pending administrator approval.' : 'Account registered successfully!');
+                        showToast(authRole === 'dealer' ? 'Dealer application submitted! Set to pending administrator approval.' : 'Account registered successfully!');
                         setCurrentScreen('login');
                       }}
                       className="mt-5 w-full py-2.5 bg-[#0A2540] text-white rounded-xl font-bold text-xs shadow-md"
@@ -2519,7 +2519,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                     </div>
                     <button
                       onClick={() => {
-                        alert('Password reset link sent to your email!');
+                        showToast('Password reset link sent to your email!');
                         setCurrentScreen('login');
                       }}
                       className="w-full py-3 bg-[#0A2540] text-white rounded-xl font-bold text-xs"
@@ -2608,7 +2608,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                           <button
                             onClick={() => {
                               setCartCount(cartCount + 1);
-                              alert('Added Hydra Pure Elite to Cart!');
+                              showToast('Added Hydra Pure Elite to Cart!');
                             }}
                             className="px-3 py-1.5 bg-teal-50 text-teal-700 border border-teal-200 rounded-xl text-xs font-bold"
                           >
@@ -3039,7 +3039,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                         <span className="text-[10px]">Orders</span>
                       </button>
                       <button
-                        onClick={() => alert('Profile screen is in Segment 7.')}
+                        onClick={() => setCurrentScreen('profile')}
                         className="flex flex-col items-center gap-0.5 text-slate-400 hover:text-slate-600"
                       >
                         <User className="w-4 h-4" />
@@ -3187,7 +3187,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                         </p>
                         <button
                           onClick={() => {
-                            alert('Technician Dispatch Ticket created for order #' + selectedOrder.orderNumber);
+                            showToast('Technician Dispatch Ticket created for order #' + selectedOrder.orderNumber);
                           }}
                           className="w-full py-2.5 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs"
                         >
@@ -3286,8 +3286,8 @@ class OrderDetailViewScreen extends StatelessWidget {
                         {/* Service Bookings Shortcut */}
                         <div
                           onClick={() =>
-                            alert(
-                              'Califnco Service Dispatch: Your next 6-month RO health inspection is scheduled for Dec 2026. Certified technician visits include TDS calibration & sediment flush.'
+                            showToast(
+                              'Next 6-month RO health inspection is scheduled for Dec 2026.'
                             )
                           }
                           className="bg-white p-3 rounded-2xl border border-slate-200 flex items-center justify-between cursor-pointer hover:border-slate-300 transition-colors shadow-2xs"
@@ -3518,13 +3518,11 @@ class OrderDetailViewScreen extends StatelessWidget {
                                 <button
                                   onClick={() => {
                                     if (addr.isDefault && addresses.length > 1) {
-                                      alert('Please set another address as default before deleting this address.');
+                                      showToast('Please set another address as default before deleting this address.');
                                       return;
                                     }
-                                    if (confirm('Delete this saved delivery address?')) {
-                                      setAddresses(addresses.filter((a) => a.id !== addr.id));
-                                      showToast('Address deleted.');
-                                    }
+                                    setAddresses(addresses.filter((a) => a.id !== addr.id));
+                                    showToast('Address deleted.');
                                   }}
                                   className="p-1 text-slate-400 hover:text-red-600"
                                 >
@@ -4172,10 +4170,8 @@ class OrderDetailViewScreen extends StatelessWidget {
                         {items.length > 0 ? (
                           <button
                             onClick={() => {
-                              if (confirm('Clear all wholesale items from bulk order?')) {
-                                setWholesaleCart({});
-                                showToast('Bulk order cart cleared.');
-                              }
+                              setWholesaleCart({});
+                              showToast('Bulk order cart cleared.');
                             }}
                             className="p-1.5 text-slate-400 hover:text-red-500 rounded-lg transition-colors"
                             title="Clear Bulk Cart"
@@ -4881,7 +4877,7 @@ class OrderDetailViewScreen extends StatelessWidget {
                         <button
                           onClick={() => {
                             if (!addressForm.recipientName || !addressForm.streetAddress || !addressForm.postalCode) {
-                              alert('Please complete the recipient name, street address, and PIN code.');
+                              showToast('Please complete the recipient name, street address, and PIN code.');
                               return;
                             }
 
