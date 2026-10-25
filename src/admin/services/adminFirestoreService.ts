@@ -150,6 +150,14 @@ export function subscribeAdminWorkspace(handlers: LiveAdminSubscriptionHandlers)
           totalAmount: Number(d.totalAmount ?? 0),
           paymentStatus: (d.paymentStatus as PaymentStatus) ?? 'cod_pending',
           fulfilmentStatus: (d.fulfilmentStatus as FulfilmentStatus) ?? 'pending',
+          razorpayOrderId: d.razorpayOrderId ? String(d.razorpayOrderId) : undefined,
+          razorpayPaymentId: d.razorpayPaymentId ? String(d.razorpayPaymentId) : undefined,
+          paymentVerifiedSource:
+            d.paymentVerifiedSource === 'razorpay_signature_verify' ||
+            d.paymentVerifiedSource === 'razorpay_webhook' ||
+            d.paymentVerifiedSource === 'admin_manual'
+              ? d.paymentVerifiedSource
+              : undefined,
           createdByUid: String(d.createdByUid ?? ''),
           updatedAtIso: timestampToIso(d.updatedAt),
         };

@@ -1,0 +1,22 @@
+{
+  "name": "califnco-razorpay-functions",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Califnco Razorpay order creation, payment signature verification, and HMAC-SHA256 webhook Cloud Functions (2nd Gen)",
+  "main": "lib/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "deploy": "firebase deploy --only functions"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.2",
+    "firebase-functions": "^6.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "^5.7.3"
+  }
+}

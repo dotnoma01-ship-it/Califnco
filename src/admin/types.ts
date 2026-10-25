@@ -2,7 +2,7 @@ export type AdminPageId = 'dashboard' | 'orders' | 'dealers' | 'service';
 
 export type OrderChannel = 'customer' | 'dealer';
 
-export type PaymentStatus = 'paid' | 'credit_net30' | 'cod_pending' | 'refunded';
+export type PaymentStatus = 'paid' | 'credit_net30' | 'cod_pending' | 'razorpay_pending' | 'refunded';
 
 export type FulfilmentStatus =
   | 'pending'
@@ -90,6 +90,9 @@ export interface OrderSummary {
   totalAmount: number;
   paymentStatus: PaymentStatus;
   fulfilmentStatus: FulfilmentStatus;
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
+  paymentVerifiedSource?: 'razorpay_signature_verify' | 'razorpay_webhook' | 'admin_manual';
   createdByUid: string;
   updatedAtIso?: string;
 }
@@ -410,6 +413,10 @@ export const PAYMENT_STATUS_META: Record<
   cod_pending: {
     label: 'COD Due on Delivery',
     toneClass: 'text-amber-700 font-medium',
+  },
+  razorpay_pending: {
+    label: 'Razorpay Pending (Unverified)',
+    toneClass: 'text-amber-700 font-semibold',
   },
   refunded: {
     label: 'Refunded',

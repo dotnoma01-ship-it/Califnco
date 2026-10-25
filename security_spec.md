@@ -40,6 +40,11 @@
    - Delivery addresses in `/users/{userId}/delivery_addresses/{addressId}` contain street/phone/coordinate PII and are strictly isolated to `request.auth.uid == userId` (`resource.data.userId == request.auth.uid` on `list` with 0 DB reads).
    - Selecting an OpenStreetMap or GPS coordinate NEVER produces a verified postal address: client `create` and `update` operations MUST set `addressVerificationStatus == 'unverified_manual_entry'` and supply valid manual postal fields (`streetAddress`, `city`, `state`, `postalCode`), or save with `hasCoordinates == false` (`locationSource == 'manual_only'`). Clients attempting to forge `addressVerificationStatus: 'postal_verified_backend'` are rejected with `PERMISSION_DENIED`.
 
+8. **Server-Verified Razorpay Payment & Webhook Idempotency Invariant**:
+   - Clients CANNOT self-certify online payments: non-admin `create` on `/orders/{orderId}` restricts retail customers to `paymentStatus in ['cod_pending', 'razorpay_pending']` and approved dealers to `paymentStatus in ['cod_pending', 'razorpay_pending', 'credit_net30']`, with `fulfilmentStatus == 'pending'` and zero gateway verification fields (`razorpayOrderId`, `razorpayPaymentId`, `paymentVerifiedSource` prohibited on client create).
+   - Transitioning `paymentStatus` from `'razorpay_pending'` to `'paid'` is strictly performed by the trusted backend (Firebase Admin SDK) only after cryptographic HMAC-SHA256 verification and Razorpay capture confirmation.
+   - Server-side idempotency and gateway binding collections (`/razorpay_orders/{razorpayOrderId}`, `/payment_settlements/{paymentId}`, `/payment_webhook_events/{eventId}`) enforce `allow get, list, create, update, delete: if false;` for all client SDK tokens.
+
 ---
 
 ## 2. The "Dirty Dozen" (+ Mobile Screens 23–26) Adversarial Payloads
@@ -64,6 +69,8 @@
 | 16 | **Notification Body Tampering on Mark-Read** | `UPDATE /notifications/notif_1` | Recipient marks `isRead: true` while also altering `title` or `orderNumber` | `PERMISSION_DENIED` |
 | 17 | **Cross-User FCM Token Theft / List Scrape** | `GET/LIST /users/other_uid/fcm_tokens` | Authenticated user attempts to read or list another user's FCM push tokens | `PERMISSION_DENIED` |
 | 18 | **Forged Verified Postal Address from Map Pin** | `CREATE /users/uid/delivery_addresses/addr_1` | Client drops map pin and sets `addressVerificationStatus: "postal_verified_backend"` or out-of-range coordinates | `PERMISSION_DENIED` |
+| 19 | **Client Self-Certified Paid Order** | `CREATE /orders/ord_spoof_paid` | Customer submits new order with `paymentStatus: "paid"` or forged `razorpayPaymentId` | `PERMISSION_DENIED` |
+| 20 | **Client Tampering with Webhook Idempotency Ledger** | `GET/CREATE /payment_webhook_events/evt_1` & `/payment_settlements/pay_1` | Authenticated client attempts to read or write server-only Razorpay ledgers | `PERMISSION_DENIED` |
 
 ---
 
@@ -83,3 +90,6 @@
 | `/notifications/{notificationId}` | `create` restricted strictly to `isAdmin()` (or Admin SDK Cloud Functions); non-admins blocked from forging notifications. | Recipient `update` restricted to one-way `isRead: false -> true` + `readAt == request.time`; already-read records locked. | `isValidUserNotification(incoming())` wraps `create` and `update` with strict key/enum/size bounds. | `list` checks `isBootstrappedAdmin()` or `resource.data.recipientUid == request.auth.uid` (0 DB reads). | **PASS** |
 | `/users/{userId}/fcm_tokens/{deviceId}` | Enforces `request.auth.uid == userId`, `incoming().userId == userId`, and `incoming().deviceId == deviceId`. | Only `authorized` or `provisional` tokens accepted; `delete` allowed for owner sign-out cleanup. | `isValidDevicePushToken(incoming())` wraps `create` and `update` with `fcmToken.size() <= 4096`. | `allow list: if false`; `get` restricted strictly to owner `request.auth.uid == userId`. | **PASS** |
 | `/users/{userId}/delivery_addresses/{addressId}` | Enforces `request.auth.uid == userId`, `incoming().userId == userId`, and `incoming().addressId == addressId`. | Client writes locked to `addressVerificationStatus == 'unverified_manual_entry'`; coordinate range & source consistency enforced. | `isValidUserDeliveryAddress(incoming())` wraps `create` and `update` with lat/lng & string bounds. | `list` checks `request.auth.uid == userId && resource.data.userId == request.auth.uid` (0 DB reads). | **PASS** |
+| `/razorpay_orders/{razorpayOrderId}` | Denied to all client SDKs (`allow read, write: if false`). | Server Admin SDK only. | Protected against client writes. | `allow get, list: if false`. | **PASS** |
+| `/payment_settlements/{paymentId}` | Denied to all client SDKs (`allow read, write: if false`). | Server Admin SDK atomic transaction only. | Protected against client writes. | `allow get, list: if false`. | **PASS** |
+| `/payment_webhook_events/{eventId}` | Denied to all client SDKs (`allow read, write: if false`). | Server Admin SDK atomic transaction only. | Protected against client writes. | `allow get, list: if false`. | **PASS** |

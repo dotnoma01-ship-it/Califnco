@@ -5,8 +5,15 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut, type User as FirebaseUser } from 'firebase/auth';
-import { doc, onSnapshot, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { collection, doc, onSnapshot, query, serverTimestamp, where, writeBatch } from 'firebase/firestore';
 import { auth, db, googleProvider, isFirebaseConfigured } from './admin/firebase';
+import {
+  createBackendRazorpayOrder,
+  fetchRazorpayBackendStatus,
+  launchRazorpayCheckoutModal,
+  verifyBackendRazorpayPayment,
+  type RazorpayBackendConfigStatus,
+} from './paymentClientService';
 import type { ServiceRequestCategory } from './admin/types';
 import { FLUTTER_FILES_SEGMENT_8 } from './dealerFlutterCode';
 import { FLUTTER_FILES_SEGMENT_9 } from './dealerBulkOrderFlutterCode';
@@ -392,7 +399,11 @@ export interface FullOrder {
   totalAmount: number;
   paymentMethod: 'razorpay' | 'cod';
   paymentStatus: 'verified' | 'pending' | 'failed';
-  orderStatus: 'confirmed' | 'processing' | 'shipped' | 'delivered' | 'cancelled';
+  orderStatus: 'pending' | 'confirmed' | 'processing' | 'shipped' | 'delivered' | 'cancelled';
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
+  paymentNote?: string;
+  persistedToFirestore?: boolean;
   deliveryAddress: {
     name: string;
     phone: string;
@@ -738,6 +749,10 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
   const [detailQty, setDetailQty] = useState<number>(1);
   const [isProductZoomOpen, setIsProductZoomOpen] = useState<boolean>(false);
   const [isPlacingRetailOrder, setIsPlacingRetailOrder] = useState<boolean>(false);
+  const [checkoutPaymentStep, setCheckoutPaymentStep] = useState<string | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [razorpayBackendStatus, setRazorpayBackendStatus] =
+    useState<RazorpayBackendConfigStatus | null>(null);
   const [retailCart, setRetailCart] = useState<CartItem[]>([
     { product: WHOLESALE_CATALOG_PRODUCTS[0], quantity: 1 },
     { product: WHOLESALE_CATALOG_PRODUCTS[2], quantity: 2 },
@@ -1044,13 +1059,109 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
       }
     );
 
+    const unsubCustomerOrders = onSnapshot(
+      query(collection(db, 'orders'), where('customerUid', '==', firebaseUser.uid)),
+      (snap) => {
+        if (snap.empty) return;
+        const statusById = new Map<
+          string,
+          {
+            paymentStatus: string;
+            fulfilmentStatus: string;
+            razorpayOrderId?: string;
+            razorpayPaymentId?: string;
+          }
+        >();
+        snap.docs.forEach((docSnap) => {
+          const d = docSnap.data();
+          statusById.set(docSnap.id, {
+            paymentStatus: String(d.paymentStatus ?? ''),
+            fulfilmentStatus: String(d.fulfilmentStatus ?? 'pending'),
+            razorpayOrderId: d.razorpayOrderId ? String(d.razorpayOrderId) : undefined,
+            razorpayPaymentId: d.razorpayPaymentId ? String(d.razorpayPaymentId) : undefined,
+          });
+        });
+
+        const mapFulfilment = (raw: string): FullOrder['orderStatus'] => {
+          if (raw === 'dispatched') return 'shipped';
+          if (
+            raw === 'pending' ||
+            raw === 'confirmed' ||
+            raw === 'processing' ||
+            raw === 'delivered' ||
+            raw === 'cancelled'
+          ) {
+            return raw;
+          }
+          return 'pending';
+        };
+
+        setOrders((prev) =>
+          prev.map((ord) => {
+            const live = statusById.get(ord.id);
+            if (!live) return ord;
+            const nextPayStatus: FullOrder['paymentStatus'] =
+              live.paymentStatus === 'paid' ? 'verified' : 'pending';
+            const nextOrderStatus = mapFulfilment(live.fulfilmentStatus);
+            return {
+              ...ord,
+              paymentStatus: nextPayStatus,
+              orderStatus: nextOrderStatus,
+              razorpayOrderId: live.razorpayOrderId ?? ord.razorpayOrderId,
+              razorpayPaymentId: live.razorpayPaymentId ?? ord.razorpayPaymentId,
+              paymentNote:
+                nextPayStatus === 'verified'
+                  ? 'Verified by Califnco backend signature & gateway capture check.'
+                  : ord.paymentNote,
+            };
+          })
+        );
+
+        setSelectedOrder((prev) => {
+          const live = statusById.get(prev.id);
+          if (!live) return prev;
+          const nextPayStatus: FullOrder['paymentStatus'] =
+            live.paymentStatus === 'paid' ? 'verified' : 'pending';
+          const nextOrderStatus = mapFulfilment(live.fulfilmentStatus);
+          return {
+            ...prev,
+            paymentStatus: nextPayStatus,
+            orderStatus: nextOrderStatus,
+            razorpayOrderId: live.razorpayOrderId ?? prev.razorpayOrderId,
+            razorpayPaymentId: live.razorpayPaymentId ?? prev.razorpayPaymentId,
+            paymentNote:
+              nextPayStatus === 'verified'
+                ? 'Verified by Califnco backend signature & gateway capture check.'
+                : prev.paymentNote,
+          };
+        });
+      },
+      () => {
+        // Ignore transient snapshot errors for non-indexed preview sessions
+      }
+    );
+
     return () => {
       unsubBookings();
       unsubNotifs();
       unsubAddresses();
       unsubDealers();
+      unsubCustomerOrders();
     };
   }, [firebaseUser]);
+
+  // Refresh Razorpay backend configuration status on mount and when opening checkout
+  useEffect(() => {
+    let active = true;
+    fetchRazorpayBackendStatus().then((status) => {
+      if (active && status) {
+        setRazorpayBackendStatus(status);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [currentScreen]);
 
   useEffect(() => {
     if (!isProductZoomOpen) return;
@@ -1213,10 +1324,147 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
     showToast('Removed item from cart.');
   };
 
+  const executeRazorpayBackendPaymentFlow = async (targetOrder: FullOrder): Promise<void> => {
+    if (!firebaseUser || !firebaseUser.emailVerified) {
+      showToast('Sign in with Google (verified email) to run authenticated Razorpay checkout.');
+      return;
+    }
+
+    setIsPlacingRetailOrder(true);
+    setCheckoutError(null);
+    try {
+      const idToken = await firebaseUser.getIdToken();
+      setCheckoutPaymentStep('Creating Razorpay order on server...');
+      const createdRzp = await createBackendRazorpayOrder({
+        firestoreOrderId: targetOrder.id,
+        idToken,
+      });
+
+      const applyPatch = (patch: Partial<FullOrder>) => {
+        setOrders((prev) =>
+          prev.map((o) => (o.id === targetOrder.id ? { ...o, ...patch } : o))
+        );
+        setSelectedOrder((prev) => (prev.id === targetOrder.id ? { ...prev, ...patch } : prev));
+      };
+
+      applyPatch({
+        razorpayOrderId: createdRzp.razorpayOrderId,
+        paymentNote: `Razorpay order ${createdRzp.razorpayOrderId} created. Awaiting gateway capture & server signature verification.`,
+      });
+
+      setCheckoutPaymentStep('Waiting for Razorpay Checkout completion...');
+      const modalResult = await launchRazorpayCheckoutModal({
+        keyId: createdRzp.keyId,
+        razorpayOrderId: createdRzp.razorpayOrderId,
+        amountPaise: createdRzp.amount,
+        currency: createdRzp.currency,
+        orderNumber: targetOrder.orderNumber,
+        customerName: targetOrder.deliveryAddress.name,
+        customerEmail: firebaseUser.email || profile.email,
+        customerPhone: targetOrder.deliveryAddress.phone,
+      });
+
+      if (modalResult.outcome === 'dismissed') {
+        const msg =
+          'Razorpay checkout window closed before completion. Order remains pending and unverified.';
+        applyPatch({
+          paymentStatus: 'pending',
+          orderStatus: 'pending',
+          paymentNote: msg,
+        });
+        showToast(msg);
+        return;
+      }
+
+      if (modalResult.outcome === 'failed') {
+        applyPatch({
+          paymentStatus: 'pending',
+          orderStatus: 'pending',
+          paymentNote: modalResult.message,
+        });
+        showToast(modalResult.message);
+        return;
+      }
+
+      // CRITICAL: Never mark order paid based on frontend Razorpay callback alone.
+      // Submit credentials to backend HMAC-SHA256 + Razorpay capture verification endpoint.
+      setCheckoutPaymentStep('Verifying HMAC-SHA256 payment signature on server...');
+      const verifyResult = await verifyBackendRazorpayPayment({
+        firestoreOrderId: targetOrder.id,
+        idToken,
+        checkoutPayload: modalResult.payload,
+      });
+
+      if (verifyResult.verified && verifyResult.paymentStatus === 'paid') {
+        applyPatch({
+          paymentStatus: 'verified',
+          orderStatus: 'confirmed',
+          razorpayOrderId: verifyResult.razorpayOrderId || createdRzp.razorpayOrderId,
+          razorpayPaymentId:
+            verifyResult.razorpayPaymentId || modalResult.payload.razorpay_payment_id,
+          paymentNote:
+            'Payment verified server-side (HMAC-SHA256 + Razorpay capture check) and settled in Firestore.',
+          timeline: [
+            {
+              status: 'Payment Verified & Order Confirmed (Server HMAC)',
+              time: 'Just now',
+              completed: true,
+              current: true,
+            },
+            { status: 'Warehouse Allocation & Pre-Inspection', time: 'Queued', completed: false },
+            { status: 'Dispatched with Technician', time: 'Pending', completed: false },
+            { status: 'Delivered & Installed', time: 'Pending', completed: false },
+          ],
+        });
+        showToast(`Payment verified! Order #${targetOrder.orderNumber} marked Paid in Firestore.`);
+      } else {
+        const pendingMsg =
+          verifyResult.message ||
+          'Payment was not verified as captured by the server. Order remains pending.';
+        applyPatch({
+          paymentStatus: 'pending',
+          orderStatus: 'pending',
+          razorpayPaymentId: modalResult.payload.razorpay_payment_id,
+          paymentNote: pendingMsg,
+        });
+        showToast(pendingMsg);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === targetOrder.id
+            ? { ...o, paymentStatus: 'pending', orderStatus: 'pending', paymentNote: msg }
+            : o
+        )
+      );
+      setSelectedOrder((prev) =>
+        prev.id === targetOrder.id
+          ? { ...prev, paymentStatus: 'pending', orderStatus: 'pending', paymentNote: msg }
+          : prev
+      );
+      showToast(msg);
+    } finally {
+      setCheckoutPaymentStep(null);
+      setIsPlacingRetailOrder(false);
+    }
+  };
+
   const handlePlaceRetailOrder = async () => {
     if (isPlacingRetailOrder || retailCart.length === 0) return;
+    setCheckoutError(null);
+
     if (!defaultDeliveryAddress.streetAddress.trim() || !defaultDeliveryAddress.postalCode.trim()) {
-      showToast('Please select or enter a valid delivery address before placing your order.');
+      setCheckoutError('Please select or enter a valid delivery address before placing your order.');
+      return;
+    }
+
+    // Online Razorpay payment strictly requires an authenticated Firebase session so the backend
+    // can verify the caller's Bearer token, bind the Firestore order, and settle it securely.
+    if (paymentChoice === 'razorpay' && (!isFirebaseConfigured || !firebaseUser?.emailVerified)) {
+      setCheckoutError(
+        'Sign in with Google first to pay online with Razorpay. Online orders require authenticated server-side order binding and payment verification.'
+      );
       return;
     }
 
@@ -1229,17 +1477,23 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
       const totalUnits = retailCart.reduce((s, c) => s + c.quantity, 0);
 
       let persistedLive = false;
-      // Persist COD orders to live Cloud Firestore when signed in with a verified email.
-      // Razorpay client-side test checkouts are intentionally NOT marked 'paid' in Firestore
-      // because no server-side Razorpay Order + HMAC-SHA256 webhook secret is configured.
-      if (isFirebaseConfigured && firebaseUser?.emailVerified && paymentChoice === 'cod') {
+      // Persist order to live Cloud Firestore with pending status ('cod_pending' or 'razorpay_pending').
+      // Firestore security rules forbid client-side 'paid' creation; only Admin SDK can transition to 'paid'.
+      if (isFirebaseConfigured && firebaseUser?.emailVerified) {
+        setCheckoutPaymentStep('Saving pending order to Cloud Firestore...');
         const batch = writeBatch(db);
         const ts = serverTimestamp();
-        const safePostal = defaultDeliveryAddress.postalCode
-          .replace(/[^0-9A-Za-z\- ]/g, '')
-          .trim()
-          .slice(0, 16) || '400050';
-        const partyId = `CUST-${firebaseUser.uid.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8) || 'USER01'}`;
+        const safePostal =
+          defaultDeliveryAddress.postalCode
+            .replace(/[^0-9A-Za-z\- ]/g, '')
+            .trim()
+            .slice(0, 16) || '400050';
+        const partyId = `CUST-${
+          firebaseUser.uid
+            .replace(/[^a-zA-Z0-9]/g, '')
+            .toUpperCase()
+            .slice(0, 8) || 'USER01'
+        }`;
 
         batch.set(doc(db, 'orders', orderId), {
           orderNumber,
@@ -1253,7 +1507,7 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
           subtotalAmount: retailSubtotal,
           deliveryAmount: retailDeliveryFee,
           totalAmount: retailGrandTotal,
-          paymentStatus: 'cod_pending',
+          paymentStatus: paymentChoice === 'cod' ? 'cod_pending' : 'razorpay_pending',
           fulfilmentStatus: 'pending',
           createdByUid: firebaseUser.uid,
           createdAt: ts,
@@ -1280,7 +1534,10 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
           recipientName: defaultDeliveryAddress.recipientName.slice(0, 120),
           email: (firebaseUser.email || profile.email).slice(0, 160),
           phone: defaultDeliveryAddress.phone.slice(0, 24),
-          shippingAddress: `${defaultDeliveryAddress.streetAddress}, ${defaultDeliveryAddress.city}, ${defaultDeliveryAddress.state}`.slice(0, 320),
+          shippingAddress: `${defaultDeliveryAddress.streetAddress}, ${defaultDeliveryAddress.city}, ${defaultDeliveryAddress.state}`.slice(
+            0,
+            320
+          ),
           postalCode: safePostal,
           gstin: '',
           dispatchNotes: (defaultDeliveryAddress.deliveryInstructions || '').slice(0, 400),
@@ -1308,7 +1565,12 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
         totalAmount: retailGrandTotal,
         paymentMethod: paymentChoice,
         paymentStatus: 'pending',
-        orderStatus: 'confirmed',
+        orderStatus: paymentChoice === 'cod' ? 'confirmed' : 'pending',
+        persistedToFirestore: persistedLive,
+        paymentNote:
+          paymentChoice === 'cod'
+            ? 'Cash on Delivery — payable upon doorstep delivery.'
+            : 'Order saved as razorpay_pending. Awaiting server-side Razorpay verification.',
         deliveryAddress: {
           name: defaultDeliveryAddress.recipientName,
           phone: defaultDeliveryAddress.phone,
@@ -1323,7 +1585,7 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
             status:
               paymentChoice === 'cod'
                 ? 'Order Submitted (COD — Pay on Delivery)'
-                : 'Test Checkout Recorded (Gateway Signature Pending)',
+                : 'Order Created — Online Payment Pending Server Verification',
             time: 'Just now',
             completed: true,
             current: true,
@@ -1338,17 +1600,24 @@ export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioP
       setSelectedOrder(newOrder);
       setRetailCart([]);
       setCurrentScreen('order_confirmation');
-      showToast(
-        persistedLive
-          ? `Order #${orderNumber} saved to Cloud Firestore (COD Pending).`
-          : paymentChoice === 'cod'
-          ? `Order #${orderNumber} recorded (COD — Pay on Delivery).`
-          : `Test order #${orderNumber} recorded (Gateway payment unverified without backend webhook).`
-      );
+
+      if (paymentChoice === 'cod') {
+        showToast(
+          persistedLive
+            ? `Order #${orderNumber} saved to Cloud Firestore (COD Pending).`
+            : `Order #${orderNumber} recorded (COD — Pay on Delivery).`
+        );
+        return;
+      }
+
+      // Initiate real backend Razorpay order creation -> Checkout SDK -> Server HMAC verification
+      await executeRazorpayBackendPaymentFlow(newOrder);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      setCheckoutError(msg);
       showToast(msg);
     } finally {
+      setCheckoutPaymentStep(null);
       setIsPlacingRetailOrder(false);
     }
   };
@@ -4607,7 +4876,10 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                         <button
                           type="button"
-                          onClick={() => setPaymentChoice('cod')}
+                          onClick={() => {
+                            setPaymentChoice('cod');
+                            setCheckoutError(null);
+                          }}
                           className={`w-full min-h-[52px] p-3 rounded-xl border text-left flex items-center justify-between transition-colors cursor-pointer ${
                             paymentChoice === 'cod'
                               ? 'border-teal-600 bg-teal-50/50'
@@ -4627,7 +4899,10 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                         <button
                           type="button"
-                          onClick={() => setPaymentChoice('razorpay')}
+                          onClick={() => {
+                            setPaymentChoice('razorpay');
+                            setCheckoutError(null);
+                          }}
                           className={`w-full min-h-[52px] p-3 rounded-xl border text-left flex items-center justify-between transition-colors cursor-pointer ${
                             paymentChoice === 'razorpay'
                               ? 'border-teal-600 bg-teal-50/50'
@@ -4637,21 +4912,62 @@ class OrderDetailViewScreen extends StatelessWidget {
                           <div className="flex items-center gap-2.5">
                             <CreditCard className="w-4 h-4 text-slate-700 shrink-0" />
                             <div>
-                              <div className="font-bold text-[#0A2540]">Razorpay (Client Test Mode)</div>
+                              <div className="font-bold text-[#0A2540]">
+                                Razorpay Online (UPI · Card · NetBanking)
+                              </div>
                               <div className="text-[10.5px] text-slate-500">
-                                UI simulation only · Requires server HMAC webhook for live capture
+                                Server order creation + HMAC-SHA256 signature &amp; webhook verification
                               </div>
                             </div>
                           </div>
-                          <span className="text-[9.5px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded shrink-0">
-                            UNVERIFIED
+                          <span
+                            className={`text-[10px] font-bold shrink-0 ${
+                              razorpayBackendStatus?.readyForTrustedSettlement
+                                ? 'text-emerald-700'
+                                : 'text-amber-700'
+                            }`}
+                          >
+                            {razorpayBackendStatus?.readyForTrustedSettlement
+                              ? razorpayBackendStatus.keyMode === 'live'
+                                ? 'LIVE READY'
+                                : 'TEST READY'
+                              : 'SECRETS NEEDED'}
                           </span>
                         </button>
 
-                        {paymentChoice === 'razorpay' && (
-                          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[10.5px] text-amber-950 leading-relaxed">
-                            <strong>Payment Verification Notice:</strong> No server-side{' '}
-                            <code>RAZORPAY_KEY_SECRET</code> webhook is configured in this preview. Orders placed in test mode are recorded as <strong>Payment Unverified</strong>.
+                        {paymentChoice === 'razorpay' && !firebaseUser?.emailVerified && (
+                          <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[10.5px] text-slate-700 space-y-2 leading-relaxed">
+                            <div>
+                              <strong>Google Sign-In Required:</strong> Online Razorpay orders bind to your verified Firebase account so the server can validate ownership and update Firestore securely.
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleMobileGoogleSignIn}
+                              className="w-full min-h-[38px] py-1.5 px-3 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-lg font-bold text-[11px] transition-colors cursor-pointer"
+                            >
+                              Sign in with Google to Enable Online Checkout
+                            </button>
+                          </div>
+                        )}
+
+                        {paymentChoice === 'razorpay' &&
+                          !razorpayBackendStatus?.readyForTrustedSettlement && (
+                            <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[10.5px] text-amber-950 leading-relaxed">
+                              <strong>Backend Configuration Status:</strong>{' '}
+                              {!razorpayBackendStatus
+                                ? 'Checking /api/payments/razorpay/config-status...'
+                                : !razorpayBackendStatus.readyForOrderCreation
+                                ? 'RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are not yet configured on the server. Submitting now will save the order as razorpay_pending (Unverified).'
+                                : 'Razorpay keys are present, awaiting privileged Firestore Admin credentials (Cloud Functions runtime or FIREBASE_SERVICE_ACCOUNT_JSON) to settle paid status.'}
+                            </div>
+                          )}
+
+                        {checkoutError && (
+                          <div
+                            role="alert"
+                            className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-[10.5px] text-red-900 leading-relaxed"
+                          >
+                            {checkoutError}
                           </div>
                         )}
                       </div>
@@ -4665,10 +4981,10 @@ class OrderDetailViewScreen extends StatelessWidget {
                         className="w-full min-h-[44px] py-3 bg-[#0A2540] hover:bg-[#061B2E] disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-sm transition-colors cursor-pointer"
                       >
                         {isPlacingRetailOrder
-                          ? 'Submitting Order...'
+                          ? checkoutPaymentStep || 'Processing Order...'
                           : paymentChoice === 'cod'
                           ? `Place COD Order (₹${retailGrandTotal.toLocaleString('en-IN')})`
-                          : `Record Test Order (₹${retailGrandTotal.toLocaleString('en-IN')})`}
+                          : `Pay Online via Razorpay (₹${retailGrandTotal.toLocaleString('en-IN')})`}
                       </button>
                     </div>
                   </div>
@@ -4685,23 +5001,31 @@ class OrderDetailViewScreen extends StatelessWidget {
                             : 'bg-amber-50 border-amber-200 text-amber-700'
                         }`}
                       >
-                        <CheckCircle2 className="w-8 h-8" />
+                        {selectedOrder.paymentStatus === 'verified' ? (
+                          <CheckCircle2 className="w-8 h-8" />
+                        ) : (
+                          <Clock className="w-8 h-8" />
+                        )}
                       </div>
                       <span
-                        className={`text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-0.5 rounded ${
+                        className={`text-[10.5px] font-extrabold uppercase tracking-wider ${
                           selectedOrder.paymentStatus === 'verified'
-                            ? 'text-emerald-800 bg-emerald-50 border border-emerald-200'
-                            : 'text-amber-900 bg-amber-50 border border-amber-200'
+                            ? 'text-emerald-700'
+                            : 'text-amber-800'
                         }`}
                       >
                         {selectedOrder.paymentStatus === 'verified'
-                          ? 'Payment Verified'
+                          ? 'Payment Verified (Server HMAC)'
                           : selectedOrder.paymentMethod === 'cod'
                           ? 'COD — Payment Due on Delivery'
-                          : 'Test Checkout — Payment Unverified'}
+                          : 'Online Payment Pending Verification'}
                       </span>
-                      <h2 className="text-xl font-black text-[#0A2540] mt-2">
-                        Order Request Recorded
+                      <h2 className="text-xl font-black text-[#0A2540] mt-1.5">
+                        {selectedOrder.paymentStatus === 'verified'
+                          ? 'Order Confirmed & Paid'
+                          : selectedOrder.paymentMethod === 'cod'
+                          ? 'COD Order Placed'
+                          : 'Order Saved — Payment Pending'}
                       </h2>
                       <p className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
                         Order Ref: <strong>#{selectedOrder.orderNumber}</strong>
@@ -4717,14 +5041,36 @@ class OrderDetailViewScreen extends StatelessWidget {
                       </div>
                       <div className="flex justify-between text-slate-600 text-[11px]">
                         <span>Payment Status:</span>
-                        <span className="font-bold text-slate-900">
+                        <span
+                          className={`font-bold ${
+                            selectedOrder.paymentStatus === 'verified'
+                              ? 'text-emerald-700'
+                              : 'text-amber-800'
+                          }`}
+                        >
                           {selectedOrder.paymentStatus === 'verified'
-                            ? 'Settled & Verified'
+                            ? 'Paid & Verified'
                             : selectedOrder.paymentMethod === 'cod'
                             ? 'Uncollected (Cash on Delivery)'
-                            : 'Pending Server Gateway Verification'}
+                            : 'Pending (Unverified)'}
                         </span>
                       </div>
+                      {selectedOrder.razorpayOrderId && (
+                        <div className="flex justify-between text-slate-600 text-[11px] gap-2">
+                          <span>Razorpay Order:</span>
+                          <span className="font-mono text-[10.5px] font-semibold text-slate-800 truncate">
+                            {selectedOrder.razorpayOrderId}
+                          </span>
+                        </div>
+                      )}
+                      {selectedOrder.razorpayPaymentId && (
+                        <div className="flex justify-between text-slate-600 text-[11px] gap-2">
+                          <span>Razorpay Payment:</span>
+                          <span className="font-mono text-[10.5px] font-semibold text-slate-800 truncate">
+                            {selectedOrder.razorpayPaymentId}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex justify-between text-slate-600 text-[11px]">
                         <span>Destination:</span>
                         <span className="font-bold text-slate-800 font-mono tabular-nums">
@@ -4732,14 +5078,24 @@ class OrderDetailViewScreen extends StatelessWidget {
                         </span>
                       </div>
                       <div className="text-[10.5px] text-slate-600 pt-2 border-t border-slate-200 leading-relaxed">
-                        {selectedOrder.paymentMethod === 'razorpay' &&
-                        selectedOrder.paymentStatus !== 'verified'
-                          ? 'Note: Client-side Razorpay test mode does not verify payment capture. Configure a backend Razorpay Order + HMAC-SHA256 webhook before fulfilling paid orders.'
-                          : selectedOrder.estimatedDelivery}
+                        {selectedOrder.paymentNote || selectedOrder.estimatedDelivery}
                       </div>
                     </div>
 
                     <div className="space-y-2 pb-1">
+                      {selectedOrder.paymentMethod === 'razorpay' &&
+                        selectedOrder.paymentStatus !== 'verified' && (
+                          <button
+                            type="button"
+                            disabled={isPlacingRetailOrder}
+                            onClick={() => executeRazorpayBackendPaymentFlow(selectedOrder)}
+                            className="w-full min-h-[44px] py-3 bg-teal-700 hover:bg-teal-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-sm transition-colors cursor-pointer"
+                          >
+                            {isPlacingRetailOrder
+                              ? checkoutPaymentStep || 'Verifying Payment...'
+                              : 'Retry Online Payment & Server Verification'}
+                          </button>
+                        )}
                       <button
                         type="button"
                         onClick={() => setCurrentScreen('order_detail_view')}
@@ -4968,9 +5324,44 @@ class OrderDetailViewScreen extends StatelessWidget {
                               ? 'Verified (Razorpay)'
                               : selectedOrder.paymentMethod === 'cod'
                               ? 'COD — Uncollected'
-                              : 'Unverified Test Checkout'}
+                              : 'Razorpay Pending (Unverified)'}
                           </span>
                         </div>
+                        {selectedOrder.razorpayOrderId && (
+                          <div className="flex justify-between items-center text-xs gap-2">
+                            <span className="text-slate-500">Razorpay Order ID</span>
+                            <span className="font-mono text-[10.5px] font-semibold text-slate-800 truncate">
+                              {selectedOrder.razorpayOrderId}
+                            </span>
+                          </div>
+                        )}
+                        {selectedOrder.razorpayPaymentId && (
+                          <div className="flex justify-between items-center text-xs gap-2">
+                            <span className="text-slate-500">Razorpay Payment ID</span>
+                            <span className="font-mono text-[10.5px] font-semibold text-slate-800 truncate">
+                              {selectedOrder.razorpayPaymentId}
+                            </span>
+                          </div>
+                        )}
+                        {selectedOrder.paymentMethod === 'razorpay' &&
+                          selectedOrder.paymentStatus !== 'verified' && (
+                            <div className="pt-2 border-t border-slate-100 space-y-2">
+                              <p className="text-[10.5px] text-amber-900 leading-relaxed">
+                                {selectedOrder.paymentNote ||
+                                  'This order has not yet been confirmed by server-side Razorpay signature or webhook verification.'}
+                              </p>
+                              <button
+                                type="button"
+                                disabled={isPlacingRetailOrder}
+                                onClick={() => executeRazorpayBackendPaymentFlow(selectedOrder)}
+                                className="w-full min-h-[40px] py-2 bg-teal-700 hover:bg-teal-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs transition-colors cursor-pointer"
+                              >
+                                {isPlacingRetailOrder
+                                  ? checkoutPaymentStep || 'Verifying Payment...'
+                                  : 'Complete / Verify Online Payment'}
+                              </button>
+                            </div>
+                          )}
                         {selectedOrder.estimatedDelivery && (
                           <div className="flex items-center gap-1.5 text-xs text-teal-800 font-semibold pt-1.5 border-t border-slate-100">
                             <Truck className="w-4 h-4 text-teal-700 shrink-0" />

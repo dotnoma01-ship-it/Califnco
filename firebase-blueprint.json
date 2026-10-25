@@ -109,8 +109,8 @@
         },
         "paymentStatus": {
           "type": "string",
-          "description": "Payment settlement state.",
-          "enum": ["paid", "credit_net30", "cod_pending", "refunded"],
+          "description": "Payment settlement state. Client online checkouts initialize as razorpay_pending until verified server-side.",
+          "enum": ["paid", "credit_net30", "cod_pending", "razorpay_pending", "refunded"],
           "maxLength": 24
         },
         "fulfilmentStatus": {
@@ -118,6 +118,26 @@
           "description": "Warehouse and logistics fulfilment lifecycle state.",
           "enum": ["pending", "confirmed", "processing", "dispatched", "delivered", "cancelled"],
           "maxLength": 24
+        },
+        "razorpayOrderId": {
+          "type": "string",
+          "description": "Server-generated Razorpay order identifier (order_*) bound by backend.",
+          "minLength": 6,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "razorpayPaymentId": {
+          "type": "string",
+          "description": "Server-verified Razorpay payment identifier (pay_*) recorded only after HMAC/API capture verification.",
+          "minLength": 6,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "paymentVerifiedSource": {
+          "type": "string",
+          "description": "Trusted server channel that verified payment capture.",
+          "enum": ["razorpay_signature_verify", "razorpay_webhook", "admin_manual_settlement"],
+          "maxLength": 40
         },
         "createdByUid": {
           "type": "string",
@@ -1084,6 +1104,158 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "RazorpayOrderBinding": {
+      "title": "RazorpayOrderBinding",
+      "description": "Server-only mapping binding a Razorpay order_id to a Califnco Firestore order and authoritative INR paise amount.",
+      "type": "object",
+      "properties": {
+        "razorpayOrderId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "firestoreOrderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderNumber": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "customerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "amountPaise": {
+          "type": "number",
+          "description": "Authoritative order payable amount in INR paise."
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["INR"],
+          "maxLength": 8
+        },
+        "status": {
+          "type": "string",
+          "enum": ["created", "paid", "failed"],
+          "maxLength": 24
+        },
+        "createdAtIso": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40
+        }
+      },
+      "required": [
+        "razorpayOrderId",
+        "firestoreOrderId",
+        "orderNumber",
+        "customerUid",
+        "amountPaise",
+        "currency",
+        "status",
+        "createdAtIso"
+      ]
+    },
+    "PaymentSettlementRecord": {
+      "title": "PaymentSettlementRecord",
+      "description": "Server-only idempotency ledger keyed by razorpayPaymentId preventing duplicate payment settlement across signature verification and webhooks.",
+      "type": "object",
+      "properties": {
+        "razorpayPaymentId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "razorpayOrderId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "firestoreOrderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "amountPaise": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["INR"],
+          "maxLength": 8
+        },
+        "verifiedBy": {
+          "type": "string",
+          "enum": ["razorpay_signature_verify", "razorpay_webhook"],
+          "maxLength": 40
+        },
+        "settledAtIso": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40
+        }
+      },
+      "required": [
+        "razorpayPaymentId",
+        "razorpayOrderId",
+        "firestoreOrderId",
+        "amountPaise",
+        "currency",
+        "verifiedBy",
+        "settledAtIso"
+      ]
+    },
+    "PaymentWebhookEventRecord": {
+      "title": "PaymentWebhookEventRecord",
+      "description": "Server-only webhook idempotency log keyed by x-razorpay-event-id preventing duplicate webhook processing.",
+      "type": "object",
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "eventType": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "razorpayOrderId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "razorpayPaymentId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "firestoreOrderId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["settled", "already_settled", "payment_failed_recorded", "ignored"],
+          "maxLength": 40
+        },
+        "processedAtIso": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40
+        }
+      },
+      "required": ["eventId", "eventType", "outcome", "processedAtIso"]
     }
   },
   "firestore": {
@@ -1134,6 +1306,18 @@
     "/users/{userId}/delivery_addresses/{addressId}": {
       "schema": "UserDeliveryAddress",
       "description": "Strictly owner-isolated customer delivery addresses and unverified map pin coordinates for Mobile Screen 26."
+    },
+    "/razorpay_orders/{razorpayOrderId}": {
+      "schema": "RazorpayOrderBinding",
+      "description": "Server-only Razorpay order binding registry (denied to all client SDKs)."
+    },
+    "/payment_settlements/{paymentId}": {
+      "schema": "PaymentSettlementRecord",
+      "description": "Server-only Razorpay payment settlement idempotency ledger (denied to all client SDKs)."
+    },
+    "/payment_webhook_events/{eventId}": {
+      "schema": "PaymentWebhookEventRecord",
+      "description": "Server-only Razorpay webhook event deduplication log (denied to all client SDKs)."
     }
   }
 }

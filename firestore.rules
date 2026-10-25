@@ -71,7 +71,9 @@ service cloud.firestore {
         data.keys().hasOnly([
           'orderNumber', 'channel', 'customerUid', 'partyId', 'partyDisplayName',
           'regionCity', 'orderDateIso', 'itemCount', 'subtotalAmount', 'deliveryAmount',
-          'totalAmount', 'paymentStatus', 'fulfilmentStatus', 'createdByUid', 'createdAt', 'updatedAt'
+          'totalAmount', 'paymentStatus', 'fulfilmentStatus',
+          'razorpayOrderId', 'razorpayPaymentId', 'paymentVerifiedSource',
+          'createdByUid', 'createdAt', 'updatedAt'
         ]) &&
         data.orderNumber is string && data.orderNumber.size() >= 5 && data.orderNumber.size() <= 40 && data.orderNumber.matches('^[A-Z0-9\\-]+$') &&
         data.channel is string && data.channel.size() <= 16 && data.channel in ['customer', 'dealer'] &&
@@ -84,8 +86,11 @@ service cloud.firestore {
         data.subtotalAmount is number && data.subtotalAmount >= 0 && data.subtotalAmount <= 100000000 &&
         data.deliveryAmount is number && data.deliveryAmount >= 0 && data.deliveryAmount <= 1000000 &&
         data.totalAmount is number && data.totalAmount >= 1 && data.totalAmount <= 100000000 &&
-        data.paymentStatus is string && data.paymentStatus.size() <= 24 && data.paymentStatus in ['paid', 'credit_net30', 'cod_pending', 'refunded'] &&
+        data.paymentStatus is string && data.paymentStatus.size() <= 24 && data.paymentStatus in ['paid', 'credit_net30', 'cod_pending', 'razorpay_pending', 'refunded'] &&
         data.fulfilmentStatus is string && data.fulfilmentStatus.size() <= 24 && data.fulfilmentStatus in ['pending', 'confirmed', 'processing', 'dispatched', 'delivered', 'cancelled'] &&
+        (!('razorpayOrderId' in data) || (data.razorpayOrderId is string && data.razorpayOrderId.size() >= 6 && data.razorpayOrderId.size() <= 64 && data.razorpayOrderId.matches('^[a-zA-Z0-9_\\-]+$'))) &&
+        (!('razorpayPaymentId' in data) || (data.razorpayPaymentId is string && data.razorpayPaymentId.size() >= 6 && data.razorpayPaymentId.size() <= 64 && data.razorpayPaymentId.matches('^[a-zA-Z0-9_\\-]+$'))) &&
+        (!('paymentVerifiedSource' in data) || (data.paymentVerifiedSource is string && data.paymentVerifiedSource.size() <= 40 && data.paymentVerifiedSource in ['razorpay_signature_verify', 'razorpay_webhook', 'admin_manual_settlement'])) &&
         data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128 && data.createdByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -344,7 +349,7 @@ service cloud.firestore {
         data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 24 &&
         data.streetAddress is string && data.streetAddress.size() >= 5 && data.streetAddress.size() <= 240 &&
         data.landmark is string && data.landmark.size() <= 140 &&
-        data.city is string && data.city.size() >= 2 && data.city.size() <= 80 &&
+        data.city is string && data.city.size() >= 2 && data.city.size() >= 80 &&
         data.state is string && data.state.size() >= 2 && data.state.size() <= 80 &&
         data.postalCode is string && data.postalCode.size() >= 4 && data.postalCode.size() <= 16 && data.postalCode.matches('^[0-9A-Za-z\\- ]+$') &&
         data.deliveryInstructions is string && data.deliveryInstructions.size() <= 240 &&
@@ -385,6 +390,9 @@ service cloud.firestore {
         incoming().totalAmount == existing().totalAmount &&
         incoming().createdByUid == existing().createdByUid &&
         incoming().createdAt == existing().createdAt &&
+        (!('razorpayOrderId' in existing()) || incoming().razorpayOrderId == existing().razorpayOrderId) &&
+        (!('razorpayPaymentId' in existing()) || incoming().razorpayPaymentId == existing().razorpayPaymentId) &&
+        (!('paymentVerifiedSource' in existing()) || incoming().paymentVerifiedSource == existing().paymentVerifiedSource) &&
         incoming().updatedAt == request.time;
     }
 
@@ -408,7 +416,7 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['fulfilmentStatus', 'paymentStatus', 'updatedAt'])
           ) ||
           (
-            existing().paymentStatus in ['cod_pending', 'credit_net30'] &&
+            existing().paymentStatus in ['cod_pending', 'credit_net30', 'razorpay_pending'] &&
             incoming().paymentStatus == existing().paymentStatus &&
             incoming().diff(existing()).affectedKeys().hasOnly(['fulfilmentStatus', 'updatedAt'])
           )
@@ -579,7 +587,14 @@ service cloud.firestore {
           isAdmin() ||
           (
             incoming().customerUid == request.auth.uid &&
-            (incoming().channel == 'customer' || isApprovedDealerUser())
+            incoming().fulfilmentStatus == 'pending' &&
+            !('razorpayOrderId' in incoming()) &&
+            !('razorpayPaymentId' in incoming()) &&
+            !('paymentVerifiedSource' in incoming()) &&
+            (
+              (incoming().channel == 'customer' && incoming().paymentStatus in ['cod_pending', 'razorpay_pending']) ||
+              (incoming().channel == 'dealer' && isApprovedDealerUser() && incoming().paymentStatus in ['cod_pending', 'razorpay_pending', 'credit_net30'])
+            )
           )
         ) &&
         existsAfter(/databases/$(database)/documents/orders/$(orderId)/private_details/shipping);
@@ -983,6 +998,34 @@ service cloud.firestore {
           isValidId(addressId) &&
           request.auth.uid == userId;
       }
+    }
+
+    // =========================================================================
+    // Collections 9, 10 & 11: Server-Only Razorpay Order, Settlement & Webhook Ledgers
+    // Strictly Denied to All Client SDKs — Accessed Exclusively via Firebase Admin SDK
+    // =========================================================================
+    match /razorpay_orders/{razorpayOrderId} {
+      allow get: if false;
+      allow list: if false;
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /payment_settlements/{paymentId} {
+      allow get: if false;
+      allow list: if false;
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /payment_webhook_events/{eventId} {
+      allow get: if false;
+      allow list: if false;
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
     }
   }
 }

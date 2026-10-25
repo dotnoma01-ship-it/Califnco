@@ -28,7 +28,7 @@ type FulfilmentStatus =
   | 'delivered'
   | 'cancelled';
 
-type PaymentStatus = 'paid' | 'credit_net30' | 'cod_pending' | 'refunded';
+type PaymentStatus = 'paid' | 'credit_net30' | 'cod_pending' | 'razorpay_pending' | 'refunded';
 type DealerApprovalStatus = 'approved' | 'pending' | 'rejected';
 type ServiceTicketStatus = 'open' | 'scheduled' | 'in_progress' | 'completed' | 'cancelled';
 
@@ -42,7 +42,7 @@ const VALID_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 const ORDER_NUMBER_REGEX = /^[A-Z0-9-]+$/;
 const GSTIN_REGEX = /^[0-9A-Z]+$/;
 
-const ORDER_ALLOWED_KEYS = [
+const ORDER_REQUIRED_KEYS = [
   'orderNumber',
   'channel',
   'customerUid',
@@ -61,6 +61,13 @@ const ORDER_ALLOWED_KEYS = [
   'updatedAt',
 ];
 
+const ORDER_ALLOWED_KEYS = [
+  ...ORDER_REQUIRED_KEYS,
+  'razorpayOrderId',
+  'razorpayPaymentId',
+  'paymentVerifiedSource',
+];
+
 function evaluateIsAdmin(auth: SimAuth | null, adminRegistry: Set<string>): boolean {
   if (!auth || auth.email_verified !== true) return false;
   if (auth.email === 'carternoah060@gmail.com') return true;
@@ -73,9 +80,35 @@ function evaluateValidId(id: string): boolean {
 
 function evaluateValidOrderSummary(data: Record<string, unknown>): boolean {
   const keys = Object.keys(data);
-  if (keys.length !== ORDER_ALLOWED_KEYS.length) return false;
-  if (!ORDER_ALLOWED_KEYS.every((k) => keys.includes(k))) return false;
+  if (!ORDER_REQUIRED_KEYS.every((k) => keys.includes(k))) return false;
   if (!keys.every((k) => ORDER_ALLOWED_KEYS.includes(k))) return false;
+
+  if (
+    'razorpayOrderId' in data &&
+    (typeof data.razorpayOrderId !== 'string' ||
+      data.razorpayOrderId.length < 6 ||
+      data.razorpayOrderId.length > 64 ||
+      !VALID_ID_REGEX.test(data.razorpayOrderId))
+  ) {
+    return false;
+  }
+  if (
+    'razorpayPaymentId' in data &&
+    (typeof data.razorpayPaymentId !== 'string' ||
+      data.razorpayPaymentId.length < 6 ||
+      data.razorpayPaymentId.length > 64 ||
+      !VALID_ID_REGEX.test(data.razorpayPaymentId))
+  ) {
+    return false;
+  }
+  if (
+    'paymentVerifiedSource' in data &&
+    !['razorpay_signature_verify', 'razorpay_webhook', 'admin_manual_settlement'].includes(
+      String(data.paymentVerifiedSource)
+    )
+  ) {
+    return false;
+  }
 
   return (
     typeof data.orderNumber === 'string' &&
@@ -107,7 +140,9 @@ function evaluateValidOrderSummary(data: Record<string, unknown>): boolean {
     data.deliveryAmount >= 0 &&
     typeof data.totalAmount === 'number' &&
     data.totalAmount >= 1 &&
-    ['paid', 'credit_net30', 'cod_pending', 'refunded'].includes(String(data.paymentStatus)) &&
+    ['paid', 'credit_net30', 'cod_pending', 'razorpay_pending', 'refunded'].includes(
+      String(data.paymentStatus)
+    ) &&
     ['pending', 'confirmed', 'processing', 'dispatched', 'delivered', 'cancelled'].includes(
       String(data.fulfilmentStatus)
     ) &&
@@ -153,6 +188,11 @@ function evaluateOrderUpdate(params: {
   for (const key of immutableKeys) {
     if (incoming[key] !== existing[key]) return 'PERMISSION_DENIED';
   }
+  for (const optKey of ['razorpayOrderId', 'razorpayPaymentId', 'paymentVerifiedSource']) {
+    if (optKey in existing && incoming[optKey] !== existing[optKey]) {
+      return 'PERMISSION_DENIED';
+    }
+  }
   if (incoming.updatedAt !== requestTime) return 'PERMISSION_DENIED';
   if (!evaluateIsAdmin(auth, adminRegistry)) return 'PERMISSION_DENIED';
 
@@ -171,7 +211,9 @@ function evaluateOrderUpdate(params: {
     ((existing.paymentStatus === 'paid' &&
       incoming.paymentStatus === 'refunded' &&
       changedKeys.every((k) => ['fulfilmentStatus', 'paymentStatus', 'updatedAt'].includes(k))) ||
-      (['cod_pending', 'credit_net30'].includes(String(existing.paymentStatus)) &&
+      (['cod_pending', 'credit_net30', 'razorpay_pending'].includes(
+        String(existing.paymentStatus)
+      ) &&
         incoming.paymentStatus === existing.paymentStatus &&
         changedKeys.every((k) => ['fulfilmentStatus', 'updatedAt'].includes(k))));
 
@@ -468,11 +510,11 @@ describe('Califnco Hardened Firestore Security Rules — Structural, Dealer Appr
     expect(rulesSource).toContain("existsAfter(/databases/$(database)/documents/dealers/$(dealerId)/application_details/review)");
     expect(rulesSource).toContain("existsAfter(/databases/$(database)/documents/service_requests/$(requestId)/private_details/contact)");
 
-    // Verify zero get() or exists() calls inside allow list blocks across all 12 match blocks
+    // Verify zero get() or exists() calls inside allow list blocks across all 15 match blocks
     const listLines = rulesSource
       .split('\n')
       .filter((line) => line.trim().startsWith('allow list:'));
-    expect(listLines.length).toBe(12);
+    expect(listLines.length).toBe(15);
     for (const line of listLines) {
       expect(line).not.toContain('get(');
       expect(line).not.toContain('exists(');
@@ -483,6 +525,9 @@ describe('Califnco Hardened Firestore Security Rules — Structural, Dealer Appr
     expect(rulesSource).toContain('match /fcm_tokens/{deviceId}');
     expect(rulesSource).toContain('match /delivery_addresses/{addressId}');
     expect(rulesSource).toContain("incoming().addressVerificationStatus == 'unverified_manual_entry'");
+    expect(rulesSource).toContain('match /razorpay_orders/{razorpayOrderId}');
+    expect(rulesSource).toContain('match /payment_settlements/{paymentId}');
+    expect(rulesSource).toContain('match /payment_webhook_events/{eventId}');
   });
 
   it('Dirty Dozen #1 & #2: blocks non-admin escalation and unverified email spoofing', () => {
@@ -646,7 +691,127 @@ describe('Califnco Hardened Firestore Security Rules — Structural, Dealer Appr
     expect(rulesSource).toContain(
       "get(/databases/$(database)/documents/dealers/$(request.auth.uid)).data.approvalStatus == 'approved'"
     );
-    expect(rulesSource).toContain("(incoming().channel == 'customer' || isApprovedDealerUser())");
+    expect(rulesSource).toContain("incoming().channel == 'dealer' && isApprovedDealerUser()");
+  });
+
+  it('Razorpay Security #19 & #20: blocks client self-certified paid orders and locks server-only payment/webhook ledgers', () => {
+    function evaluateCustomerOrderCreate(params: {
+      auth: SimAuth | null;
+      adminRegistry: Set<string>;
+      orderId: string;
+      incoming: Record<string, unknown>;
+      hasShippingSubdoc: boolean;
+      requestTime: number;
+    }): 'ALLOW' | 'PERMISSION_DENIED' {
+      const { auth, adminRegistry, orderId, incoming, hasShippingSubdoc, requestTime } = params;
+      if (!auth || auth.email_verified !== true) return 'PERMISSION_DENIED';
+      if (!evaluateValidId(orderId)) return 'PERMISSION_DENIED';
+      if (!evaluateValidOrderSummary(incoming)) return 'PERMISSION_DENIED';
+      if (!hasShippingSubdoc) return 'PERMISSION_DENIED';
+      if (incoming.createdByUid !== auth.uid) return 'PERMISSION_DENIED';
+      if (incoming.createdAt !== requestTime || incoming.updatedAt !== requestTime) {
+        return 'PERMISSION_DENIED';
+      }
+      if (evaluateIsAdmin(auth, adminRegistry)) return 'ALLOW';
+
+      if (
+        incoming.customerUid === auth.uid &&
+        incoming.fulfilmentStatus === 'pending' &&
+        !('razorpayOrderId' in incoming) &&
+        !('razorpayPaymentId' in incoming) &&
+        !('paymentVerifiedSource' in incoming) &&
+        incoming.channel === 'customer' &&
+        ['cod_pending', 'razorpay_pending'].includes(String(incoming.paymentStatus))
+      ) {
+        return 'ALLOW';
+      }
+      return 'PERMISSION_DENIED';
+    }
+
+    // Customer attempting to mark an online order as 'paid' directly from client -> PERMISSION_DENIED
+    expect(
+      evaluateCustomerOrderCreate({
+        auth: regularCustomer,
+        adminRegistry: new Set(),
+        orderId: 'ord_spoof_paid_1',
+        hasShippingSubdoc: true,
+        requestTime: SERVER_NOW,
+        incoming: {
+          ...baseOrder,
+          customerUid: regularCustomer.uid,
+          createdByUid: regularCustomer.uid,
+          paymentStatus: 'paid',
+          fulfilmentStatus: 'pending',
+          createdAt: SERVER_NOW,
+          updatedAt: SERVER_NOW,
+        },
+      })
+    ).toBe('PERMISSION_DENIED');
+
+    // Customer attempting to inject a forged razorpayPaymentId -> PERMISSION_DENIED
+    expect(
+      evaluateCustomerOrderCreate({
+        auth: regularCustomer,
+        adminRegistry: new Set(),
+        orderId: 'ord_spoof_payid_1',
+        hasShippingSubdoc: true,
+        requestTime: SERVER_NOW,
+        incoming: {
+          ...baseOrder,
+          customerUid: regularCustomer.uid,
+          createdByUid: regularCustomer.uid,
+          paymentStatus: 'razorpay_pending',
+          fulfilmentStatus: 'pending',
+          razorpayPaymentId: 'pay_forged123456',
+          createdAt: SERVER_NOW,
+          updatedAt: SERVER_NOW,
+        },
+      })
+    ).toBe('PERMISSION_DENIED');
+
+    // Customer creating a legitimate pending online order ('razorpay_pending') -> ALLOW
+    expect(
+      evaluateCustomerOrderCreate({
+        auth: regularCustomer,
+        adminRegistry: new Set(),
+        orderId: 'ord_rzp_pending_1',
+        hasShippingSubdoc: true,
+        requestTime: SERVER_NOW,
+        incoming: {
+          ...baseOrder,
+          customerUid: regularCustomer.uid,
+          createdByUid: regularCustomer.uid,
+          paymentStatus: 'razorpay_pending',
+          fulfilmentStatus: 'pending',
+          createdAt: SERVER_NOW,
+          updatedAt: SERVER_NOW,
+        },
+      })
+    ).toBe('ALLOW');
+
+    // Admin advancing fulfilment on a server-verified Razorpay order preserves gateway fields -> ALLOW
+    const serverVerifiedOrder = {
+      ...baseOrder,
+      paymentStatus: 'paid',
+      fulfilmentStatus: 'confirmed',
+      razorpayOrderId: 'order_P9aBcDeFgHiJkL',
+      razorpayPaymentId: 'pay_P9xYz123456789',
+      paymentVerifiedSource: 'razorpay_webhook',
+    };
+    expect(
+      evaluateOrderUpdate({
+        auth: adminAuth,
+        adminRegistry: new Set(),
+        orderId: 'ord_rzp_verified_1',
+        existing: serverVerifiedOrder,
+        incoming: {
+          ...serverVerifiedOrder,
+          fulfilmentStatus: 'processing',
+          updatedAt: SERVER_NOW,
+        },
+        requestTime: SERVER_NOW,
+      })
+    ).toBe('ALLOW');
   });
 
   it('Page 22 Security #11 & #12: blocks skipping open->completed, blocks closing without resolutionNotes, and locks completed tickets', () => {
