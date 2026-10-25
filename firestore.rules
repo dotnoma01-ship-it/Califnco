@@ -43,6 +43,12 @@ service cloud.firestore {
       );
     }
 
+    function isApprovedDealerUser() {
+      return isVerifiedUser() &&
+        exists(/databases/$(database)/documents/dealers/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/dealers/$(request.auth.uid)).data.approvalStatus == 'approved';
+    }
+
     // =========================================================================
     // Entity Validation Blueprints (Synchronized with firebase-blueprint.json)
     // =========================================================================
@@ -132,16 +138,48 @@ service cloud.firestore {
           'approvalStatus', 'wholesaleTier', 'createdByUid', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'dealerCode', 'ownerUid', 'businessName', 'regionCity',
-          'approvalStatus', 'wholesaleTier', 'createdByUid', 'createdAt', 'updatedAt'
+          'dealerCode', 'dealerId', 'ownerUid', 'businessName', 'contactPerson',
+          'gstin', 'businessType', 'regionCity', 'applicationDateIso',
+          'approvalStatus', 'wholesaleTier', 'creditLimit', 'availableCredit',
+          'rejectionReason', 'reviewedByUid', 'reviewedAt',
+          'createdByUid', 'createdAt', 'updatedAt'
         ]) &&
         data.dealerCode is string && data.dealerCode.size() >= 4 && data.dealerCode.size() <= 32 && data.dealerCode.matches('^[A-Z0-9\\-]+$') &&
+        (!('dealerId' in data) || (data.dealerId is string && data.dealerId.size() >= 4 && data.dealerId.size() <= 32 && data.dealerId.matches('^[A-Z0-9\\-]+$'))) &&
         data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.businessName is string && data.businessName.size() >= 2 && data.businessName.size() <= 140 &&
+        (!('contactPerson' in data) || (data.contactPerson is string && data.contactPerson.size() >= 2 && data.contactPerson.size() <= 100)) &&
+        (!('gstin' in data) || (data.gstin is string && data.gstin.size() >= 15 && data.gstin.size() <= 20 && data.gstin.matches('^[0-9A-Z]+$'))) &&
+        (!('businessType' in data) || (data.businessType is string && data.businessType.size() <= 40 && data.businessType in ['Distributor', 'Retail Franchise', 'Commercial Integrator', 'Service Franchise'])) &&
         data.regionCity is string && data.regionCity.size() >= 2 && data.regionCity.size() <= 80 &&
+        (!('applicationDateIso' in data) || (data.applicationDateIso is string && data.applicationDateIso.size() >= 10 && data.applicationDateIso.size() <= 40)) &&
         data.approvalStatus is string && data.approvalStatus.size() <= 16 && data.approvalStatus in ['approved', 'pending', 'rejected'] &&
         data.wholesaleTier is string && data.wholesaleTier.size() >= 2 && data.wholesaleTier.size() <= 80 &&
+        (!('creditLimit' in data) || (data.creditLimit is number && data.creditLimit >= 0 && data.creditLimit <= 10000000)) &&
+        (!('availableCredit' in data) || (data.availableCredit is number && data.availableCredit >= 0 && data.availableCredit <= 10000000)) &&
+        (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 400)) &&
+        (!('reviewedByUid' in data) || (data.reviewedByUid is string && data.reviewedByUid.size() >= 1 && data.reviewedByUid.size() <= 128 && data.reviewedByUid.matches('^[a-zA-Z0-9_\\-]+$'))) &&
+        (!('reviewedAt' in data) || (data.reviewedAt is timestamp)) &&
         data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128 && data.createdByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDealerApplicationReviewDetails(data) {
+      return data.keys().hasAll([
+          'dealerDocId', 'applicantEmail', 'applicantPhone', 'registeredWarehouse',
+          'annualProjectedVolumeInr', 'applicantNotes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'dealerDocId', 'applicantEmail', 'applicantPhone', 'registeredWarehouse',
+          'annualProjectedVolumeInr', 'applicantNotes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.dealerDocId is string && data.dealerDocId.size() >= 1 && data.dealerDocId.size() <= 128 && data.dealerDocId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.applicantEmail is string && data.applicantEmail.size() >= 5 && data.applicantEmail.size() <= 160 &&
+        data.applicantPhone is string && data.applicantPhone.size() >= 7 && data.applicantPhone.size() <= 24 &&
+        data.registeredWarehouse is string && data.registeredWarehouse.size() >= 5 && data.registeredWarehouse.size() <= 320 &&
+        data.annualProjectedVolumeInr is number && data.annualProjectedVolumeInr >= 0 && data.annualProjectedVolumeInr <= 500000000 &&
+        data.applicantNotes is string && data.applicantNotes.size() <= 500 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -152,19 +190,80 @@ service cloud.firestore {
           'status', 'regionCity', 'scheduledDateIso', 'createdByUid', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ticketNumber', 'orderId', 'orderNumber', 'customerUid', 'serviceType',
-          'status', 'regionCity', 'scheduledDateIso', 'createdByUid', 'createdAt', 'updatedAt'
+          'ticketNumber', 'orderId', 'orderNumber', 'customerUid',
+          'customerCode', 'customerDisplayName', 'requestCategory', 'serviceType',
+          'status', 'regionCity', 'submissionDateIso', 'scheduledDateIso',
+          'preferredTimeSlot', 'productId', 'productModel',
+          'requestDetails', 'resolutionNotes', 'updatedByUid',
+          'createdByUid', 'createdAt', 'updatedAt'
         ]) &&
         data.ticketNumber is string && data.ticketNumber.size() >= 5 && data.ticketNumber.size() <= 40 && data.ticketNumber.matches('^[A-Z0-9\\-]+$') &&
         data.orderId is string && data.orderId.size() >= 1 && data.orderId.size() <= 128 && data.orderId.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.orderNumber is string && data.orderNumber.size() >= 5 && data.orderNumber.size() <= 40 && data.orderNumber.matches('^[A-Z0-9\\-]+$') &&
         data.customerUid is string && data.customerUid.size() >= 1 && data.customerUid.size() <= 128 && data.customerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
-        data.serviceType is string && data.serviceType.size() <= 48 && data.serviceType in ['RO Installation', '6-Month Filter Check', 'Booster Pump Calibration', 'Warranty Repair'] &&
-        data.status is string && data.status.size() <= 20 && data.status in ['open', 'scheduled', 'completed', 'cancelled'] &&
+        (!('customerCode' in data) || (data.customerCode is string && data.customerCode.size() >= 3 && data.customerCode.size() <= 40 && data.customerCode.matches('^[A-Z0-9\\-]+$'))) &&
+        (!('customerDisplayName' in data) || (data.customerDisplayName is string && data.customerDisplayName.size() >= 2 && data.customerDisplayName.size() <= 120)) &&
+        (!('requestCategory' in data) || (data.requestCategory is string && data.requestCategory.size() <= 24 && data.requestCategory in ['Installation', 'Maintenance', 'Repair'])) &&
+        data.serviceType is string && data.serviceType.size() <= 48 && data.serviceType in [
+          'RO Installation',
+          'Preventive Maintenance',
+          '6-Month Filter Check',
+          'Purifier Repair',
+          'Booster Pump Calibration',
+          'Warranty Repair'
+        ] &&
+        data.status is string && data.status.size() <= 20 && data.status in ['open', 'scheduled', 'in_progress', 'completed', 'cancelled'] &&
         data.regionCity is string && data.regionCity.size() >= 2 && data.regionCity.size() <= 80 &&
+        (!('submissionDateIso' in data) || (data.submissionDateIso is string && data.submissionDateIso.size() >= 10 && data.submissionDateIso.size() <= 40)) &&
         data.scheduledDateIso is string && data.scheduledDateIso.size() >= 10 && data.scheduledDateIso.size() <= 40 &&
+        (!('preferredTimeSlot' in data) || (data.preferredTimeSlot is string && data.preferredTimeSlot.size() <= 60)) &&
+        (!('productId' in data) || (data.productId is string && data.productId.size() <= 64 && (data.productId == '' || data.productId.matches('^[a-zA-Z0-9_\\-]+$')))) &&
+        (!('productModel' in data) || (data.productModel is string && data.productModel.size() >= 2 && data.productModel.size() <= 160)) &&
+        (!('requestDetails' in data) || (data.requestDetails is string && data.requestDetails.size() >= 5 && data.requestDetails.size() <= 600)) &&
+        (!('resolutionNotes' in data) || (data.resolutionNotes is string && data.resolutionNotes.size() <= 600)) &&
+        (!('updatedByUid' in data) || (data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 && data.updatedByUid.matches('^[a-zA-Z0-9_\\-]+$'))) &&
         data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128 && data.createdByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidServiceRequestPrivateContact(data) {
+      return data.keys().hasAll([
+          'requestId', 'contactName', 'phone', 'serviceAddress',
+          'waterSourceTdsPpm', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'requestId', 'contactName', 'phone', 'serviceAddress',
+          'waterSourceTdsPpm', 'createdAt', 'updatedAt'
+        ]) &&
+        data.requestId is string && data.requestId.size() >= 1 && data.requestId.size() <= 128 && data.requestId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.contactName is string && data.contactName.size() >= 2 && data.contactName.size() <= 120 &&
+        data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 24 &&
+        data.serviceAddress is string && data.serviceAddress.size() >= 5 && data.serviceAddress.size() <= 320 &&
+        data.waterSourceTdsPpm is number && data.waterSourceTdsPpm >= 0 && data.waterSourceTdsPpm <= 5000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidServiceScheduleConfig(data) {
+      return data.keys().hasAll([
+          'scheduleId', 'dateIso', 'postalCode', 'isActive',
+          'availableSlots', 'updatedByUid', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'scheduleId', 'dateIso', 'postalCode', 'isActive',
+          'availableSlots', 'updatedByUid', 'updatedAt'
+        ]) &&
+        data.scheduleId is string && data.scheduleId.size() >= 1 && data.scheduleId.size() <= 128 && data.scheduleId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.dateIso is string && data.dateIso.size() == 10 && data.dateIso.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+        data.postalCode is string && data.postalCode.size() >= 4 && data.postalCode.size() <= 16 && data.postalCode.matches('^[0-9A-Za-z\\- ]+$') &&
+        data.isActive is bool &&
+        data.availableSlots is list && data.availableSlots.size() <= 8 &&
+        (
+          data.availableSlots.size() == 0 ||
+          (data.availableSlots[0] is string && data.availableSlots[0].size() >= 3 && data.availableSlots[0].size() <= 40)
+        ) &&
+        data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 && data.updatedByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.updatedAt is timestamp;
     }
 
@@ -226,6 +325,105 @@ service cloud.firestore {
     }
 
     // =========================================================================
+    // Dealer Approval State Machine Helpers (Page 21)
+    // =========================================================================
+    function isDealerImmutableCoreUnchanged() {
+      return incoming().dealerCode == existing().dealerCode &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().businessName == existing().businessName &&
+        incoming().regionCity == existing().regionCity &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        (!('dealerId' in existing()) || incoming().dealerId == existing().dealerId) &&
+        (!('contactPerson' in existing()) || incoming().contactPerson == existing().contactPerson) &&
+        (!('gstin' in existing()) || incoming().gstin == existing().gstin) &&
+        (!('businessType' in existing()) || incoming().businessType == existing().businessType) &&
+        (!('applicationDateIso' in existing()) || incoming().applicationDateIso == existing().applicationDateIso) &&
+        incoming().updatedAt == request.time;
+    }
+
+    function isApproveDealerAction() {
+      return existing().approvalStatus == 'pending' &&
+        incoming().approvalStatus == 'approved' &&
+        'rejectionReason' in incoming() && incoming().rejectionReason == '' &&
+        'creditLimit' in incoming() && incoming().creditLimit is number && incoming().creditLimit >= 50000 && incoming().creditLimit <= 10000000 &&
+        'availableCredit' in incoming() && incoming().availableCredit == incoming().creditLimit &&
+        'reviewedByUid' in incoming() && incoming().reviewedByUid == request.auth.uid &&
+        'reviewedAt' in incoming() && incoming().reviewedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'approvalStatus', 'wholesaleTier', 'creditLimit', 'availableCredit',
+          'rejectionReason', 'reviewedByUid', 'reviewedAt', 'updatedAt'
+        ]);
+    }
+
+    function isRejectDealerAction() {
+      return existing().approvalStatus == 'pending' &&
+        incoming().approvalStatus == 'rejected' &&
+        'rejectionReason' in incoming() && incoming().rejectionReason is string &&
+        incoming().rejectionReason.size() >= 5 && incoming().rejectionReason.size() <= 400 &&
+        'creditLimit' in incoming() && incoming().creditLimit == 0 &&
+        'availableCredit' in incoming() && incoming().availableCredit == 0 &&
+        'reviewedByUid' in incoming() && incoming().reviewedByUid == request.auth.uid &&
+        'reviewedAt' in incoming() && incoming().reviewedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'approvalStatus', 'wholesaleTier', 'creditLimit', 'availableCredit',
+          'rejectionReason', 'reviewedByUid', 'reviewedAt', 'updatedAt'
+        ]);
+    }
+
+    // =========================================================================
+    // Service Desk & Mobile Booking State Machine Helpers (Page 22 & Screens 23–24)
+    // =========================================================================
+    function isServiceNotTerminal() {
+      return !(existing().status in ['completed', 'cancelled']);
+    }
+
+    function isServiceImmutableCoreUnchanged() {
+      return incoming().ticketNumber == existing().ticketNumber &&
+        incoming().orderId == existing().orderId &&
+        incoming().orderNumber == existing().orderNumber &&
+        incoming().customerUid == existing().customerUid &&
+        incoming().serviceType == existing().serviceType &&
+        incoming().regionCity == existing().regionCity &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        (!('customerCode' in existing()) || incoming().customerCode == existing().customerCode) &&
+        (!('customerDisplayName' in existing()) || incoming().customerDisplayName == existing().customerDisplayName) &&
+        (!('requestCategory' in existing()) || incoming().requestCategory == existing().requestCategory) &&
+        (!('submissionDateIso' in existing()) || incoming().submissionDateIso == existing().submissionDateIso) &&
+        (!('preferredTimeSlot' in existing()) || incoming().preferredTimeSlot == existing().preferredTimeSlot) &&
+        (!('productId' in existing()) || incoming().productId == existing().productId) &&
+        (!('productModel' in existing()) || incoming().productModel == existing().productModel) &&
+        (!('requestDetails' in existing()) || incoming().requestDetails == existing().requestDetails) &&
+        'updatedByUid' in incoming() && incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+    }
+
+    function isValidServiceStatusStep() {
+      return (incoming().status == existing().status) ||
+        (existing().status == 'open' && incoming().status in ['scheduled', 'in_progress', 'cancelled']) ||
+        (existing().status == 'scheduled' && incoming().status in ['in_progress', 'completed', 'cancelled']) ||
+        (existing().status == 'in_progress' && incoming().status in ['completed', 'cancelled']);
+    }
+
+    function hasRequiredResolutionNotesIfClosing() {
+      return !(incoming().status in ['completed', 'cancelled']) || (
+        'resolutionNotes' in incoming() &&
+        incoming().resolutionNotes is string &&
+        incoming().resolutionNotes.size() >= 5 &&
+        incoming().resolutionNotes.size() <= 600
+      );
+    }
+
+    function isAdminServiceDeskUpdate() {
+      return isValidServiceStatusStep() &&
+        hasRequiredResolutionNotesIfClosing() &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'scheduledDateIso', 'resolutionNotes', 'updatedByUid', 'updatedAt'
+        ]);
+    }
+
+    // =========================================================================
     // Collection 1: /admins/{adminId}
     // =========================================================================
     match /admins/{adminId} {
@@ -255,7 +453,13 @@ service cloud.firestore {
         incoming().createdByUid == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
-        (incoming().customerUid == request.auth.uid || isAdmin()) &&
+        (
+          isAdmin() ||
+          (
+            incoming().customerUid == request.auth.uid &&
+            (incoming().channel == 'customer' || isApprovedDealerUser())
+          )
+        ) &&
         existsAfter(/databases/$(database)/documents/orders/$(orderId)/private_details/shipping);
 
       allow update: if isVerifiedUser() &&
@@ -359,25 +563,73 @@ service cloud.firestore {
       allow create: if isVerifiedUser() &&
         isValidId(dealerId) &&
         isValidDealerSummary(incoming()) &&
+        incoming().keys().hasAll([
+          'dealerCode', 'dealerId', 'ownerUid', 'businessName', 'contactPerson',
+          'gstin', 'businessType', 'regionCity', 'applicationDateIso',
+          'approvalStatus', 'wholesaleTier', 'creditLimit', 'availableCredit',
+          'rejectionReason', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
         incoming().createdByUid == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
-        (incoming().ownerUid == request.auth.uid || isAdmin());
+        existsAfter(/databases/$(database)/documents/dealers/$(dealerId)/application_details/review) &&
+        (
+          isAdmin() ||
+          (
+            dealerId == request.auth.uid &&
+            incoming().ownerUid == request.auth.uid &&
+            incoming().approvalStatus == 'pending' &&
+            incoming().rejectionReason == '' &&
+            incoming().creditLimit == 0 &&
+            incoming().availableCredit == 0 &&
+            !('reviewedByUid' in incoming()) &&
+            !('reviewedAt' in incoming())
+          )
+        );
 
       allow update: if isVerifiedUser() &&
         isValidId(dealerId) &&
         isValidDealerSummary(incoming()) &&
-        incoming().dealerCode == existing().dealerCode &&
-        incoming().ownerUid == existing().ownerUid &&
-        incoming().businessName == existing().businessName &&
-        incoming().regionCity == existing().regionCity &&
-        incoming().createdByUid == existing().createdByUid &&
-        incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['approvalStatus', 'wholesaleTier', 'updatedAt']) &&
-        isAdmin();
+        isDealerImmutableCoreUnchanged() &&
+        isAdmin() &&
+        (
+          isApproveDealerAction() ||
+          isRejectDealerAction()
+        );
 
       allow delete: if false;
+
+      // -----------------------------------------------------------------------
+      // Subcollection 3A: /dealers/{dealerId}/application_details/{detailId}
+      // Strictly Isolated Applicant Contact & Warehouse Review Details
+      // -----------------------------------------------------------------------
+      match /application_details/{detailId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(dealerId) &&
+          detailId == 'review' &&
+          (
+            isAdmin() ||
+            get(/databases/$(database)/documents/dealers/$(dealerId)).data.ownerUid == request.auth.uid
+          );
+
+        allow list: if false;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(dealerId) &&
+          detailId == 'review' &&
+          isValidDealerApplicationReviewDetails(incoming()) &&
+          incoming().dealerDocId == dealerId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/dealers/$(dealerId)) &&
+          (
+            isAdmin() ||
+            getAfter(/databases/$(database)/documents/dealers/$(dealerId)).data.ownerUid == request.auth.uid
+          );
+
+        allow update: if false;
+        allow delete: if false;
+      }
     }
 
     // =========================================================================
@@ -390,29 +642,106 @@ service cloud.firestore {
       allow create: if isVerifiedUser() &&
         isValidId(requestId) &&
         isValidServiceRequest(incoming()) &&
+        incoming().keys().hasAll([
+          'ticketNumber', 'orderId', 'orderNumber', 'customerUid',
+          'customerCode', 'customerDisplayName', 'requestCategory', 'serviceType',
+          'status', 'regionCity', 'submissionDateIso', 'scheduledDateIso',
+          'productModel', 'requestDetails', 'resolutionNotes',
+          'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
         incoming().createdByUid == request.auth.uid &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
-        existsAfter(/databases/$(database)/documents/orders/$(incoming().orderId)) &&
-        (incoming().customerUid == request.auth.uid || isAdmin());
+        (
+          incoming().orderId == 'DIRECT-SERVICE' ||
+          (
+            existsAfter(/databases/$(database)/documents/orders/$(incoming().orderId)) &&
+            (
+              isAdmin() ||
+              getAfter(/databases/$(database)/documents/orders/$(incoming().orderId)).data.customerUid == request.auth.uid
+            )
+          )
+        ) &&
+        existsAfter(/databases/$(database)/documents/service_requests/$(requestId)/private_details/contact) &&
+        (
+          isAdmin() ||
+          (
+            incoming().customerUid == request.auth.uid &&
+            incoming().status == 'open' &&
+            incoming().resolutionNotes == ''
+          )
+        );
 
       allow update: if isVerifiedUser() &&
         isValidId(requestId) &&
         isValidServiceRequest(incoming()) &&
-        !(existing().status in ['completed', 'cancelled']) &&
-        incoming().ticketNumber == existing().ticketNumber &&
-        incoming().orderId == existing().orderId &&
-        incoming().orderNumber == existing().orderNumber &&
-        incoming().customerUid == existing().customerUid &&
-        incoming().serviceType == existing().serviceType &&
-        incoming().regionCity == existing().regionCity &&
-        incoming().createdByUid == existing().createdByUid &&
-        incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'scheduledDateIso', 'updatedAt']) &&
+        isServiceNotTerminal() &&
+        isServiceImmutableCoreUnchanged() &&
+        isAdminServiceDeskUpdate() &&
         isAdmin();
 
       allow delete: if false;
+
+      // -----------------------------------------------------------------------
+      // Subcollection 4A: /service_requests/{requestId}/private_details/{detailId}
+      // Strictly Isolated Customer Service Site Address & Phone PII
+      // -----------------------------------------------------------------------
+      match /private_details/{detailId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(requestId) &&
+          detailId == 'contact' &&
+          (
+            isAdmin() ||
+            get(/databases/$(database)/documents/service_requests/$(requestId)).data.customerUid == request.auth.uid
+          );
+
+        allow list: if false;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(requestId) &&
+          detailId == 'contact' &&
+          isValidServiceRequestPrivateContact(incoming()) &&
+          incoming().requestId == requestId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/service_requests/$(requestId)) &&
+          (
+            isAdmin() ||
+            getAfter(/databases/$(database)/documents/service_requests/$(requestId)).data.customerUid == request.auth.uid
+          );
+
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+    // =========================================================================
+    // Collection 5: /service_schedules/{scheduleId}
+    // Configured Technician Time-Slot Availability (Screen 23)
+    // =========================================================================
+    match /service_schedules/{scheduleId} {
+      allow get: if isVerifiedUser() && isValidId(scheduleId);
+      allow list: if false;
+
+      allow create: if isVerifiedUser() &&
+        isValidId(scheduleId) &&
+        isValidServiceScheduleConfig(incoming()) &&
+        incoming().scheduleId == scheduleId &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+
+      allow update: if isVerifiedUser() &&
+        isValidId(scheduleId) &&
+        isValidServiceScheduleConfig(incoming()) &&
+        incoming().scheduleId == scheduleId &&
+        incoming().dateIso == existing().dateIso &&
+        incoming().postalCode == existing().postalCode &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+
+      allow delete: if isVerifiedUser() && isValidId(scheduleId) && isAdmin();
     }
   }
 }

@@ -24,6 +24,8 @@ interface AdminDashboardPageProps {
   onSeedFirestore: () => void;
   onInspectOrder: (orderId: string) => void;
   onFilterOrdersByStatus: (status: FulfilmentStatus | 'all') => void;
+  onOpenDealerApprovals: () => void;
+  onOpenServiceDesk: () => void;
 }
 
 export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
@@ -38,6 +40,8 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
   onSeedFirestore,
   onInspectOrder,
   onFilterOrdersByStatus,
+  onOpenDealerApprovals,
+  onOpenServiceDesk,
 }) => {
   const metrics = useMemo(() => {
     const totalOrders = orders.length;
@@ -54,7 +58,7 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
     const pendingDealers = dealers.filter((d) => d.approvalStatus === 'pending').length;
 
     const activeServiceRequests = serviceRequests.filter(
-      (s) => s.status === 'open' || s.status === 'scheduled'
+      (s) => s.status === 'open' || s.status === 'scheduled' || s.status === 'in_progress'
     ).length;
     const openUrgentTickets = serviceRequests.filter((s) => s.status === 'open').length;
 
@@ -174,60 +178,76 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
       <section aria-label="Operational Summary Metrics">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {/* Card 1: Total Orders */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+          <button
+            type="button"
+            onClick={() => onFilterOrdersByStatus('all')}
+            className="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-5 flex flex-col justify-between text-left transition-colors cursor-pointer"
+          >
             <span className="text-xs font-medium text-slate-500">Total Orders</span>
             <div className="mt-2 font-mono text-3xl font-semibold text-slate-900 tabular-nums">
               {metrics.totalOrders}
             </div>
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+            <div className="mt-3 pt-3 border-t border-slate-100 w-full flex items-center justify-between text-xs text-slate-600">
               <span>Net Order Volume</span>
               <span className="font-mono font-medium text-slate-900 tabular-nums">
                 {formatInr(metrics.grossRevenue)}
               </span>
             </div>
-          </div>
+          </button>
 
           {/* Card 2: Pending Orders */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+          <button
+            type="button"
+            onClick={() => onFilterOrdersByStatus('pending')}
+            className="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-5 flex flex-col justify-between text-left transition-colors cursor-pointer"
+          >
             <span className="text-xs font-medium text-slate-500">Pending Orders</span>
             <div className="mt-2 font-mono text-3xl font-semibold text-amber-700 tabular-nums">
               {metrics.pendingOrders}
             </div>
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+            <div className="mt-3 pt-3 border-t border-slate-100 w-full flex items-center justify-between text-xs text-slate-600">
               <span>Active Fulfilment Queue</span>
               <span className="font-mono font-medium text-slate-900 tabular-nums">
                 {metrics.activeFulfilmentQueue} open
               </span>
             </div>
-          </div>
+          </button>
 
-          {/* Card 3: Approved Dealers */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+          {/* Card 3: Approved Dealers (Links directly to Page 21) */}
+          <button
+            type="button"
+            onClick={onOpenDealerApprovals}
+            className="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-5 flex flex-col justify-between text-left transition-colors cursor-pointer"
+          >
             <span className="text-xs font-medium text-slate-500">Approved Dealers</span>
             <div className="mt-2 font-mono text-3xl font-semibold text-teal-800 tabular-nums">
               {metrics.approvedDealers}
             </div>
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+            <div className="mt-3 pt-3 border-t border-slate-100 w-full flex items-center justify-between text-xs text-slate-600">
               <span>Pending Verification</span>
-              <span className="font-mono font-medium text-slate-900 tabular-nums">
+              <span className="font-mono font-medium text-amber-800 tabular-nums">
                 {metrics.pendingDealers} applications
               </span>
             </div>
-          </div>
+          </button>
 
-          {/* Card 4: Service Requests */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between">
+          {/* Card 4: Service Requests (Links directly to Page 22) */}
+          <button
+            type="button"
+            onClick={onOpenServiceDesk}
+            className="bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-5 flex flex-col justify-between text-left transition-colors cursor-pointer"
+          >
             <span className="text-xs font-medium text-slate-500">Service Requests</span>
             <div className="mt-2 font-mono text-3xl font-semibold text-slate-900 tabular-nums">
               {metrics.activeServiceRequests}
             </div>
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+            <div className="mt-3 pt-3 border-t border-slate-100 w-full flex items-center justify-between text-xs text-slate-600">
               <span>Unscheduled Dispatch</span>
               <span className="font-mono font-medium text-slate-900 tabular-nums">
                 {metrics.openUrgentTickets} of {metrics.totalServiceTickets}
               </span>
             </div>
-          </div>
+          </button>
         </div>
       </section>
 
@@ -240,8 +260,8 @@ export const AdminDashboardPage: React.FC<AdminDashboardPageProps> = ({
             </h2>
             <p className="text-sm text-slate-600 leading-relaxed">
               Your Cloud Firestore database is connected and secured, with zero order documents
-              currently stored. Seed sample Califnco retail and dealer orders to test live status
-              transitions and isolated shipping inspection.
+              currently stored. Seed sample Califnco orders, dealer applications, and service
+              requests to test live administration workflows.
             </p>
             {!isDemoMode && (
               <div className="pt-3">

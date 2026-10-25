@@ -3,9 +3,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { onAuthStateChanged, signInWithPopup, signOut, type User as FirebaseUser } from 'firebase/auth';
+import { auth, googleProvider, isFirebaseConfigured } from './admin/firebase';
+import type { ServiceRequestCategory } from './admin/types';
 import { FLUTTER_FILES_SEGMENT_8 } from './dealerFlutterCode';
 import { FLUTTER_FILES_SEGMENT_9 } from './dealerBulkOrderFlutterCode';
+import { FLUTTER_FILES_SEGMENT_10 } from './serviceBookingFlutterCode';
+import {
+  fetchConfiguredScheduleSlots,
+  setFirestoreScheduleConfigForTesting,
+  submitMobileServiceBooking,
+  subscribeCustomerServiceRequests,
+  validateMobileServiceBookingForm,
+  type MobileServiceBookingRecord,
+  type ScheduleLookupResult,
+} from './mobileServiceBookingService';
 import {
   Droplets,
   ArrowRight,
@@ -95,7 +108,9 @@ type ScreenId =
   | 'dealer_home'
   | 'wholesale_catalog'
   | 'bulk_order_cart'
-  | 'dealer_order_history';
+  | 'dealer_order_history'
+  | 'service_booking'
+  | 'booking_confirmation';
 
 export interface Product {
   id: string;
@@ -521,13 +536,59 @@ const SAMPLE_ORDERS: FullOrder[] = [
   },
 ];
 
-export default function App() {
+export interface MobileAppStudioProps {
+  onOpenAdminConsole?: () => void;
+}
+
+const SERVICE_APPLICABLE_PRODUCTS: Array<{
+  id: string;
+  name: string;
+  badge: string;
+  onlyMaintenance?: boolean;
+}> = [
+  {
+    id: 'wp-01',
+    name: 'Califnco Hydra Pure Elite RO+UV+Copper',
+    badge: 'Purchased · #CALIF-82941',
+  },
+  {
+    id: 'dp-01',
+    name: 'Califnco Aquara Touchless Digital Dispenser',
+    badge: 'Purchased · #CALIF-71024',
+  },
+  {
+    id: 'pm-01',
+    name: 'Califnco 150 GPD High-Torque Booster Pump',
+    badge: 'Catalog Hardware',
+  },
+  {
+    id: 'fl-01',
+    name: 'Califnco 3-in-1 Filter Replacement Master Kit',
+    badge: 'Consumable Kit',
+  },
+  {
+    id: '',
+    name: 'General Water System Assessment (No Specific Unit)',
+    badge: 'Multi-Unit / Periodic Check',
+    onlyMaintenance: true,
+  },
+];
+
+function getTomorrowIsoDate(): string {
+  const d = new Date(Date.now() + 86400000);
+  return d.toISOString().slice(0, 10);
+}
+
+export default function MobileAppStudio({ onOpenAdminConsole }: MobileAppStudioProps = {}) {
   const [deviceModel, setDeviceModel] = useState<'pixel' | 'galaxy' | 'compact'>('pixel');
-  const [currentScreen, setCurrentScreen] = useState<ScreenId>('bulk_order_cart');
+  const [currentScreen, setCurrentScreen] = useState<ScreenId>('service_booking');
   const [activeTab, setActiveTab] = useState<'simulator' | 'code' | 'instructions'>('simulator');
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
-  const [selectedCodeFile, setSelectedCodeFile] = useState<string>('bulk_order_cart_screen.dart');
-  const [segmentCodeTab, setSegmentCodeTab] = useState<'segment9' | 'segment8'>('segment9');
+  const [selectedCodeFile, setSelectedCodeFile] = useState<string>('service_booking_screen.dart');
+  const [segmentCodeTab, setSegmentCodeTab] = useState<'segment10' | 'segment9' | 'segment8'>('segment10');
+
+  // Firebase Auth state for real Cloud Firestore writes & live status streaming
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(() => auth.currentUser);
 
   // Segment 9: Bulk Order Cart & Dealer Order History states
   const [isSubmittingPO, setIsSubmittingPO] = useState<boolean>(false);
@@ -538,7 +599,7 @@ export default function App() {
   const [selectedOrder, setSelectedOrder] = useState<FullOrder>(SAMPLE_ORDERS[0]);
   const [isOrdersLoading, setIsOrdersLoading] = useState<boolean>(false);
   const [activeBottomNav, setActiveBottomNav] = useState<'home' | 'catalog' | 'cart' | 'orders' | 'profile'>('profile');
-  const [authRole, setAuthRole] = useState<'customer' | 'dealer'>('dealer');
+  const [authRole, setAuthRole] = useState<'customer' | 'dealer'>('customer');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [catalogCategory, setCatalogCategory] = useState<string>('All');
   const [paymentChoice, setPaymentChoice] = useState<'razorpay' | 'cod'>('razorpay');
@@ -584,9 +645,261 @@ export default function App() {
     'sp-01': 25,
   });
 
+  // =========================================================================
+  // Segment 10: Screen 23 (Service Booking) & Screen 24 (Booking Confirmation)
+  // =========================================================================
+  const [serviceCategory, setServiceCategory] = useState<ServiceRequestCategory>('Installation');
+  const [serviceProductId, setServiceProductId] = useState<string>('wp-01');
+  const [serviceProductModel, setServiceProductModel] = useState<string>(
+    'Califnco Hydra Pure Elite RO+UV+Copper'
+  );
+  const [serviceLinkedOrderNumber, setServiceLinkedOrderNumber] = useState<string>('CALIF-82941');
+  const [serviceDescription, setServiceDescription] = useState<string>(
+    'Wall-mount kitchen RO installation near municipal tap inlet; require pre-filter housing setup and initial TDS calibration.'
+  );
+  const [selectedServiceAddressId, setSelectedServiceAddressId] = useState<string>('addr-01');
+  const [serviceStreetAddress, setServiceStreetAddress] = useState<string>(
+    INITIAL_ADDRESSES[0].streetAddress
+  );
+  const [serviceCityState, setServiceCityState] = useState<string>(
+    `${INITIAL_ADDRESSES[0].city}, ${INITIAL_ADDRESSES[0].state}`
+  );
+  const [servicePostalCode, setServicePostalCode] = useState<string>(
+    INITIAL_ADDRESSES[0].postalCode
+  );
+  const [servicePreferredDate, setServicePreferredDate] = useState<string>(() =>
+    getTomorrowIsoDate()
+  );
+  const [simulatedScheduleEnabled, setSimulatedScheduleEnabled] = useState<boolean>(false);
+  const [scheduleLookup, setScheduleLookup] = useState<ScheduleLookupResult>({
+    scheduleId: '',
+    isConfigured: false,
+    availableSlots: [],
+    source: 'unconfigured',
+  });
+  const [isCheckingSchedule, setIsCheckingSchedule] = useState<boolean>(false);
+  const [serviceSelectedSlot, setServiceSelectedSlot] = useState<string>('');
+  const [serviceContactName, setServiceContactName] = useState<string>(INITIAL_PROFILE.fullName);
+  const [serviceContactPhone, setServiceContactPhone] = useState<string>(INITIAL_PROFILE.phone);
+  const [serviceFormErrors, setServiceFormErrors] = useState<Record<string, string>>({});
+  const [serviceSubmitError, setServiceSubmitError] = useState<string | null>(null);
+  const [isSubmittingService, setIsSubmittingService] = useState<boolean>(false);
+
+  const [localSubmittedBookings, setLocalSubmittedBookings] = useState<MobileServiceBookingRecord[]>(
+    []
+  );
+  const [firestoreCustomerBookings, setFirestoreCustomerBookings] = useState<
+    MobileServiceBookingRecord[]
+  >([]);
+  const [selectedBookingRecord, setSelectedBookingRecord] =
+    useState<MobileServiceBookingRecord | null>(null);
+  const [isMyRequestsDrawerOpen, setIsMyRequestsDrawerOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) return;
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setFirebaseUser(u);
+      if (u?.displayName) {
+        setServiceContactName(u.displayName);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured || !firebaseUser || !firebaseUser.emailVerified) {
+      setFirestoreCustomerBookings([]);
+      return;
+    }
+    const unsub = subscribeCustomerServiceRequests(firebaseUser.uid, {
+      onRequests: (records) => {
+        setFirestoreCustomerBookings(records);
+      },
+    });
+    return () => unsub();
+  }, [firebaseUser]);
+
+  // Query configured scheduling system (/service_schedules/{date}_{pin}) whenever date or PIN changes
+  useEffect(() => {
+    let cancelled = false;
+    setIsCheckingSchedule(true);
+    fetchConfiguredScheduleSlots(
+      servicePreferredDate,
+      servicePostalCode,
+      simulatedScheduleEnabled
+    )
+      .then((res) => {
+        if (cancelled) return;
+        setScheduleLookup(res);
+        setIsCheckingSchedule(false);
+        if (!res.isConfigured || !res.availableSlots.includes(serviceSelectedSlot)) {
+          setServiceSelectedSlot('');
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setScheduleLookup({
+          scheduleId: '',
+          isConfigured: false,
+          availableSlots: [],
+          source: 'unconfigured',
+        });
+        setServiceSelectedSlot('');
+        setIsCheckingSchedule(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [servicePreferredDate, servicePostalCode, simulatedScheduleEnabled, firebaseUser]);
+
+  const allMyServiceRequests = useMemo(() => {
+    const map = new Map<string, MobileServiceBookingRecord>();
+    for (const r of firestoreCustomerBookings) {
+      map.set(r.id, r);
+    }
+    for (const r of localSubmittedBookings) {
+      if (!map.has(r.id)) {
+        map.set(r.id, r);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      (b.submissionDateIso || '').localeCompare(a.submissionDateIso || '')
+    );
+  }, [firestoreCustomerBookings, localSubmittedBookings]);
+
+  const activeBookingForConfirmation = useMemo<MobileServiceBookingRecord>(() => {
+    if (selectedBookingRecord) {
+      const liveMatch = firestoreCustomerBookings.find(
+        (r) => r.id === selectedBookingRecord.id
+      );
+      return liveMatch ?? selectedBookingRecord;
+    }
+    if (allMyServiceRequests.length > 0) {
+      return allMyServiceRequests[0];
+    }
+    return {
+      id: 'srv-preview-4810',
+      ticketNumber: 'SRV-2026-4810',
+      orderId: 'DIRECT-SERVICE',
+      orderNumber: 'CALIF-82941',
+      customerUid: firebaseUser?.uid ?? 'user_sarah',
+      customerCode: 'CUST-SARAH1',
+      customerDisplayName: serviceContactName || 'Sarah Jenkins',
+      requestCategory: serviceCategory,
+      serviceType: 'RO Installation',
+      status: 'open',
+      regionCity: serviceCityState || 'Mumbai, Maharashtra',
+      submissionDateIso: new Date().toISOString(),
+      preferredDateIso: servicePreferredDate,
+      preferredTimeSlot: '',
+      productId: 'wp-01',
+      productModel: 'Califnco Hydra Pure Elite RO+UV+Copper',
+      requestDetails: serviceDescription,
+      resolutionNotes: '',
+      serviceAddress: `${serviceStreetAddress}, ${serviceCityState} - ${servicePostalCode}`,
+      contactName: serviceContactName || 'Sarah Jenkins',
+      contactPhone: serviceContactPhone || '+91 98765 43210',
+      persistedToFirestore: false,
+    };
+  }, [
+    selectedBookingRecord,
+    firestoreCustomerBookings,
+    allMyServiceRequests,
+    firebaseUser,
+    serviceContactName,
+    serviceCategory,
+    serviceCityState,
+    servicePreferredDate,
+    serviceDescription,
+    serviceStreetAddress,
+    servicePostalCode,
+    serviceContactPhone,
+  ]);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+    setTimeout(() => setToastMessage(null), 3200);
+  };
+
+  const handleMobileGoogleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      showToast('Signed in with Google. Service requests now persist directly to Cloud Firestore.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('popup-closed-by-user')) {
+        showToast(msg);
+      }
+    }
+  };
+
+  const handleSelectSavedServiceAddress = (addrId: string) => {
+    setSelectedServiceAddressId(addrId);
+    if (addrId === 'custom') return;
+    const found = addresses.find((a) => a.id === addrId);
+    if (found) {
+      setServiceStreetAddress(found.streetAddress);
+      setServiceCityState(`${found.city}, ${found.state}`);
+      setServicePostalCode(found.postalCode);
+      setServiceContactName(found.recipientName);
+      setServiceContactPhone(found.phone);
+      setServiceFormErrors((prev) => {
+        const next = { ...prev };
+        delete next.streetAddress;
+        delete next.cityState;
+        delete next.postalCode;
+        delete next.contactPhone;
+        return next;
+      });
+    }
+  };
+
+  const handleServiceBookingSubmit = async () => {
+    if (isSubmittingService) return;
+    setServiceSubmitError(null);
+
+    const payload = {
+      category: serviceCategory,
+      productId: serviceProductId,
+      productModel: serviceProductModel,
+      issueDescription: serviceDescription,
+      streetAddress: serviceStreetAddress,
+      cityState: serviceCityState,
+      postalCode: servicePostalCode,
+      preferredDateIso: servicePreferredDate,
+      preferredTimeSlot: scheduleLookup.isConfigured ? serviceSelectedSlot : '',
+      isScheduleConfigured: scheduleLookup.isConfigured,
+      configuredSlots: scheduleLookup.availableSlots,
+      contactName: serviceContactName,
+      contactPhone: serviceContactPhone,
+      linkedOrderNumber: serviceLinkedOrderNumber,
+    };
+
+    const validationErrors = validateMobileServiceBookingForm(payload);
+    setServiceFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
+      setServiceSubmitError('Please fix the highlighted fields before submitting your request.');
+      return;
+    }
+
+    setIsSubmittingService(true);
+    try {
+      const created = await submitMobileServiceBooking(payload);
+      setLocalSubmittedBookings((prev) => [created, ...prev]);
+      setSelectedBookingRecord(created);
+      setCurrentScreen('booking_confirmation');
+      showToast(
+        created.persistedToFirestore
+          ? `Saved ${created.ticketNumber} to Cloud Firestore (Open — Pending Confirmation).`
+          : `Submitted ${created.ticketNumber} in simulator preview (Sign in with Google for Cloud Firestore write).`
+      );
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      setServiceSubmitError(raw);
+    } finally {
+      setIsSubmittingService(false);
+    }
   };
 
   const copyCode = (filename: string, code: string) => {
@@ -2164,96 +2477,98 @@ class OrderDetailViewScreen extends StatelessWidget {
     },
   };
 
-  const flutterFiles = segmentCodeTab === 'segment9' ? FLUTTER_FILES_SEGMENT_9 : FLUTTER_FILES_SEGMENT_8;
+  const flutterFiles =
+    segmentCodeTab === 'segment10'
+      ? FLUTTER_FILES_SEGMENT_10
+      : segmentCodeTab === 'segment9'
+      ? FLUTTER_FILES_SEGMENT_9
+      : FLUTTER_FILES_SEGMENT_8;
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
-      {/* Top Bar Studio Control */}
-      <header className="bg-slate-950 border-b border-slate-800 px-6 py-3 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-teal-500/20 border border-teal-500/30 flex items-center justify-center text-teal-400">
-            <Droplets className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-base tracking-tight text-white">Califnco Flutter Studio</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-teal-950 text-teal-400 border border-teal-800">
-                Segment 9: Bulk Cart & Dealer Order History
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">Screens 17 & 18 with MOQ Validation, Commercial Freight, Idempotent PO Submission & Scoped Order History</p>
-          </div>
+      {/* Top Bar Studio Control (3-Zone Contract) */}
+      <header className="bg-slate-950 border-b border-slate-800 px-6 py-3 flex items-center justify-between gap-8">
+        <div className="flex items-center gap-2.5 whitespace-nowrap shrink-0">
+          <Droplets className="w-5 h-5 text-teal-400 shrink-0" />
+          <span className="font-bold text-base tracking-tight text-white">
+            Califnco Mobile
+          </span>
         </div>
 
-        {/* View Toggle Tabs */}
-        <div className="flex items-center gap-2 bg-slate-900 p-1 rounded-xl border border-slate-800">
+        {/* Navigation Links / Studio Views */}
+        <nav className="flex items-center gap-5 text-xs font-medium">
           <button
+            type="button"
             onClick={() => setActiveTab('simulator')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+            className={`py-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 ${
               activeTab === 'simulator'
-                ? 'bg-teal-500 text-slate-950 shadow-sm font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'border-teal-400 text-white font-semibold'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Smartphone className="w-3.5 h-3.5" />
-            Android Simulator
+            Simulator
           </button>
           <button
-            onClick={() => setActiveTab('code')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+            type="button"
+            onClick={() => {
+              setSegmentCodeTab('segment10');
+              setSelectedCodeFile('service_booking_screen.dart');
+              setActiveTab('code');
+            }}
+            className={`py-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 ${
               activeTab === 'code'
-                ? 'bg-teal-500 text-slate-950 shadow-sm font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'border-teal-400 text-white font-semibold'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Code2 className="w-3.5 h-3.5" />
-            Flutter Source Files
+            Flutter Code
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('instructions')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+            className={`py-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 ${
               activeTab === 'instructions'
-                ? 'bg-teal-500 text-slate-950 shadow-sm font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'border-teal-400 text-white font-semibold'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Info className="w-3.5 h-3.5" />
-            Segment 6 Guide
+            Testing Guide
           </button>
-        </div>
+          {onOpenAdminConsole && (
+            <button
+              type="button"
+              onClick={onOpenAdminConsole}
+              className="py-1.5 text-slate-400 hover:text-teal-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 border-transparent"
+            >
+              Admin Console
+            </button>
+          )}
+        </nav>
 
-        {/* Device Dimensions Preset */}
-        {activeTab === 'simulator' && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-slate-500">Device:</span>
-            <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5">
-              <button
-                onClick={() => setDeviceModel('pixel')}
-                className={`px-2.5 py-1 rounded text-xs transition-colors ${
-                  deviceModel === 'pixel' ? 'bg-slate-800 text-white font-medium' : 'text-slate-400'
-                }`}
-              >
-                Pixel 8 Pro
-              </button>
-              <button
-                onClick={() => setDeviceModel('galaxy')}
-                className={`px-2.5 py-1 rounded text-xs transition-colors ${
-                  deviceModel === 'galaxy' ? 'bg-slate-800 text-white font-medium' : 'text-slate-400'
-                }`}
-              >
-                Galaxy S24
-              </button>
-              <button
-                onClick={() => setDeviceModel('compact')}
-                className={`px-2.5 py-1 rounded text-xs transition-colors ${
-                  deviceModel === 'compact' ? 'bg-slate-800 text-white font-medium' : 'text-slate-400'
-                }`}
-              >
-                Compact (360dp)
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Primary Action: Live Firebase Auth for Firestore Persistence */}
+        <div className="flex items-center gap-3 shrink-0">
+          {firebaseUser ? (
+            <button
+              type="button"
+              onClick={() => {
+                void signOut(auth);
+                showToast('Signed out of Firebase session.');
+              }}
+              className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title={`Connected to Cloud Firestore as ${firebaseUser.email || firebaseUser.uid}`}
+            >
+              Firestore Live · Sign Out
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleMobileGoogleSignIn}
+              className="px-3.5 py-2 rounded-lg bg-teal-500 hover:bg-teal-400 text-slate-950 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Connect Google Auth
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Main Content Area */}
@@ -2615,6 +2930,25 @@ class OrderDetailViewScreen extends StatelessWidget {
                             + Add
                           </button>
                         </div>
+                      </div>
+
+                      {/* Service Booking Quick Entry Card (Screen 23) */}
+                      <div className="bg-white p-3.5 rounded-2xl border border-slate-200 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <h4 className="font-extrabold text-xs text-[#0A2540]">
+                            Purifier Installation, Maintenance &amp; Repair
+                          </h4>
+                          <p className="text-[10.5px] text-slate-500 mt-0.5 leading-snug">
+                            Request a Califnco water specialist visit for your home unit.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setCurrentScreen('service_booking')}
+                          className="px-3 py-2 min-h-[40px] bg-[#0A2540] text-white rounded-xl text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          Book Service
+                        </button>
                       </div>
                     </div>
 
@@ -3187,9 +3521,25 @@ class OrderDetailViewScreen extends StatelessWidget {
                         </p>
                         <button
                           onClick={() => {
-                            showToast('Technician Dispatch Ticket created for order #' + selectedOrder.orderNumber);
+                            const primaryItem = selectedOrder.items[0];
+                            setServiceCategory('Installation');
+                            if (primaryItem) {
+                              setServiceProductId(primaryItem.productId);
+                              setServiceProductModel(primaryItem.productName);
+                            }
+                            setServiceLinkedOrderNumber(selectedOrder.orderNumber);
+                            setSelectedServiceAddressId('custom');
+                            setServiceStreetAddress(selectedOrder.deliveryAddress.address);
+                            setServiceCityState(`${selectedOrder.deliveryAddress.city}, Maharashtra`);
+                            setServicePostalCode(selectedOrder.deliveryAddress.pincode);
+                            setServiceContactName(selectedOrder.deliveryAddress.name);
+                            setServiceContactPhone(selectedOrder.deliveryAddress.phone);
+                            setServiceDescription(
+                              `Certified installation requested for order #${selectedOrder.orderNumber}.`
+                            );
+                            setCurrentScreen('service_booking');
                           }}
-                          className="w-full py-2.5 bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs"
+                          className="w-full py-2.5 min-h-[44px] bg-[#0A2540] hover:bg-[#061B2E] text-white rounded-xl font-bold text-xs cursor-pointer"
                         >
                           Request Installation Visit
                         </button>
@@ -3283,13 +3633,9 @@ class OrderDetailViewScreen extends StatelessWidget {
                           <ChevronRight className="w-4 h-4 text-slate-400" />
                         </div>
 
-                        {/* Service Bookings Shortcut */}
+                        {/* Service Bookings Shortcut -> Opens Screen 23 */}
                         <div
-                          onClick={() =>
-                            showToast(
-                              'Next 6-month RO health inspection is scheduled for Dec 2026.'
-                            )
-                          }
+                          onClick={() => setCurrentScreen('service_booking')}
                           className="bg-white p-3 rounded-2xl border border-slate-200 flex items-center justify-between cursor-pointer hover:border-slate-300 transition-colors shadow-2xs"
                         >
                           <div className="flex items-center gap-3">
@@ -3297,8 +3643,10 @@ class OrderDetailViewScreen extends StatelessWidget {
                               <Wrench className="w-4 h-4" />
                             </div>
                             <div>
-                              <h4 className="font-bold text-xs text-[#0A2540]">Service Bookings & Warranty</h4>
-                              <p className="text-[10.5px] text-slate-400">Next RO checkup: Dec 2026</p>
+                              <h4 className="font-bold text-xs text-[#0A2540]">Service Bookings &amp; Warranty</h4>
+                              <p className="text-[10.5px] text-slate-400">
+                                Book installation, maintenance, or repair
+                              </p>
                             </div>
                           </div>
                           <ChevronRight className="w-4 h-4 text-slate-400" />
@@ -4744,6 +5092,784 @@ class OrderDetailViewScreen extends StatelessWidget {
                   </div>
                 )}
 
+                {/* ================= SCREEN 23: SERVICE BOOKING ================= */}
+                {currentScreen === 'service_booking' && (() => {
+                  const applicableProductChoices = SERVICE_APPLICABLE_PRODUCTS.filter(
+                    (p) => !p.onlyMaintenance || serviceCategory === 'Maintenance'
+                  );
+
+                  return (
+                    <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+                      {/* Mobile App Bar */}
+                      <div className="bg-white px-4 h-14 border-b border-slate-100 flex items-center justify-between shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setCurrentScreen('home')}
+                          aria-label="Back to Customer Home"
+                          className="w-11 h-11 -ml-2 rounded-xl flex items-center justify-center text-[#0A2540] hover:bg-slate-100 cursor-pointer"
+                        >
+                          <ArrowLeft className="w-5 h-5" />
+                        </button>
+                        <div className="text-center min-w-0">
+                          <h2 className="text-sm font-extrabold text-[#0A2540] truncate">
+                            Book Purifier Service
+                          </h2>
+                          <p className="text-[10px] text-slate-500">
+                            {firebaseUser
+                              ? 'Connected to Cloud Firestore'
+                              : 'Sign in above for live Firestore write'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsMyRequestsDrawerOpen(true)}
+                          aria-label="View My Service Requests"
+                          className="w-11 h-11 -mr-2 rounded-xl flex items-center justify-center text-slate-600 hover:bg-slate-100 cursor-pointer relative"
+                          title="My Service Requests"
+                        >
+                          <FileText className="w-4 h-4" />
+                          {allMyServiceRequests.length > 0 && (
+                            <span className="absolute top-2 right-2 text-[9px] font-mono font-bold text-teal-700">
+                              {allMyServiceRequests.length}
+                            </span>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Scrollable Booking Form */}
+                      <div className="flex-1 overflow-y-auto p-3.5 space-y-3 pb-24">
+                        {serviceSubmitError && (
+                          <div
+                            role="alert"
+                            className="p-3 rounded-2xl bg-red-50 border border-red-200 text-xs text-red-800 flex items-start gap-2"
+                          >
+                            <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                            <span className="leading-snug">{serviceSubmitError}</span>
+                          </div>
+                        )}
+
+                        {/* 1. Service Type Selection */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-extrabold text-[#0A2540]">
+                              01. Service Type
+                            </span>
+                            <span className="text-[10.5px] text-slate-400">Required</span>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            {(['Installation', 'Maintenance', 'Repair'] as const).map((cat) => {
+                              const isSelected = serviceCategory === cat;
+                              return (
+                                <button
+                                  key={cat}
+                                  type="button"
+                                  onClick={() => {
+                                    setServiceCategory(cat);
+                                    if (cat !== 'Maintenance' && !serviceProductId) {
+                                      setServiceProductId('wp-01');
+                                      setServiceProductModel(
+                                        'Califnco Hydra Pure Elite RO+UV+Copper'
+                                      );
+                                    }
+                                    setServiceFormErrors((prev) => {
+                                      const next = { ...prev };
+                                      delete next.product;
+                                      return next;
+                                    });
+                                  }}
+                                  className={`min-h-[44px] px-2 py-2 rounded-xl text-xs font-bold transition-colors border cursor-pointer whitespace-nowrap ${
+                                    isSelected
+                                      ? 'bg-[#0A2540] text-white border-[#0A2540]'
+                                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                                  }`}
+                                >
+                                  {cat}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* 2. Relevant Product Selection */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label
+                              htmlFor="service-product-select"
+                              className="text-xs font-extrabold text-[#0A2540]"
+                            >
+                              02. Relevant Califnco Product
+                            </label>
+                            <span className="text-[10.5px] text-slate-400">
+                              {serviceCategory === 'Maintenance' ? 'Optional' : 'Required'}
+                            </span>
+                          </div>
+                          <select
+                            id="service-product-select"
+                            value={serviceProductId}
+                            onChange={(e) => {
+                              const nextId = e.target.value;
+                              const match = SERVICE_APPLICABLE_PRODUCTS.find(
+                                (p) => p.id === nextId
+                              );
+                              setServiceProductId(nextId);
+                              setServiceProductModel(
+                                match?.name || 'General Water System Assessment'
+                              );
+                              setServiceFormErrors((prev) => {
+                                const next = { ...prev };
+                                delete next.product;
+                                return next;
+                              });
+                            }}
+                            className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-[#0A2540] outline-none focus:border-teal-600"
+                          >
+                            {applicableProductChoices.map((prod) => (
+                              <option key={prod.id || 'general'} value={prod.id}>
+                                {prod.name} ({prod.badge})
+                              </option>
+                            ))}
+                          </select>
+                          {serviceFormErrors.product && (
+                            <p className="text-[11px] font-medium text-red-600">
+                              {serviceFormErrors.product}
+                            </p>
+                          )}
+                        </div>
+
+                        {/* 3. Description of the Issue */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label
+                              htmlFor="service-issue-desc"
+                              className="text-xs font-extrabold text-[#0A2540]"
+                            >
+                              03. Description of Issue / Request
+                            </label>
+                            <span className="text-[10px] font-mono tabular-nums text-slate-400">
+                              {serviceDescription.trim().length}/600
+                            </span>
+                          </div>
+                          <textarea
+                            id="service-issue-desc"
+                            rows={3}
+                            maxLength={600}
+                            value={serviceDescription}
+                            onChange={(e) => {
+                              setServiceDescription(e.target.value);
+                              setServiceFormErrors((prev) => {
+                                const next = { ...prev };
+                                delete next.description;
+                                return next;
+                              });
+                            }}
+                            placeholder={
+                              serviceCategory === 'Installation'
+                                ? 'Describe mounting surface, water inlet point, and plumbing readiness...'
+                                : 'Describe low water flow, TDS taste change, indicator alert, or leak...'
+                            }
+                            className={`w-full p-2.5 rounded-xl border bg-slate-50 text-xs text-slate-800 leading-relaxed resize-none outline-none focus:border-teal-600 ${
+                              serviceFormErrors.description
+                                ? 'border-red-400'
+                                : 'border-slate-200'
+                            }`}
+                          />
+                          {serviceFormErrors.description && (
+                            <p className="text-[11px] font-medium text-red-600">
+                              {serviceFormErrors.description}
+                            </p>
+                          )}
+                        </div>
+
+                        {/* 4. Service Address */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-extrabold text-[#0A2540]">
+                              04. Service Address
+                            </span>
+                            <span className="text-[10.5px] text-slate-400">Site Location</span>
+                          </div>
+
+                          {/* Saved Address Selector */}
+                          <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+                            {addresses.map((addr) => (
+                              <button
+                                key={addr.id}
+                                type="button"
+                                onClick={() => handleSelectSavedServiceAddress(addr.id)}
+                                className={`min-h-[36px] px-2.5 py-1 rounded-lg text-[11px] font-semibold border whitespace-nowrap shrink-0 cursor-pointer ${
+                                  selectedServiceAddressId === addr.id
+                                    ? 'bg-teal-50 border-teal-600 text-teal-900'
+                                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                                }`}
+                              >
+                                {addr.label} · {addr.postalCode}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => handleSelectSavedServiceAddress('custom')}
+                              className={`min-h-[36px] px-2.5 py-1 rounded-lg text-[11px] font-semibold border whitespace-nowrap shrink-0 cursor-pointer ${
+                                selectedServiceAddressId === 'custom'
+                                  ? 'bg-teal-50 border-teal-600 text-teal-900'
+                                  : 'bg-slate-50 border-slate-200 text-slate-600'
+                              }`}
+                            >
+                              Custom Site
+                            </button>
+                          </div>
+
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              value={serviceStreetAddress}
+                              onChange={(e) => {
+                                setSelectedServiceAddressId('custom');
+                                setServiceStreetAddress(e.target.value);
+                              }}
+                              placeholder="Flat / House No., Building, Street"
+                              aria-label="Service street address"
+                              className={`w-full min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600 ${
+                                serviceFormErrors.streetAddress
+                                  ? 'border-red-400'
+                                  : 'border-slate-200'
+                              }`}
+                            />
+                            <div className="grid grid-cols-5 gap-2">
+                              <input
+                                type="text"
+                                value={serviceCityState}
+                                onChange={(e) => {
+                                  setSelectedServiceAddressId('custom');
+                                  setServiceCityState(e.target.value);
+                                }}
+                                placeholder="City, State"
+                                aria-label="Service city and state"
+                                className={`col-span-3 min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600 ${
+                                  serviceFormErrors.cityState
+                                    ? 'border-red-400'
+                                    : 'border-slate-200'
+                                }`}
+                              />
+                              <input
+                                type="text"
+                                value={servicePostalCode}
+                                onChange={(e) => {
+                                  setSelectedServiceAddressId('custom');
+                                  setServicePostalCode(e.target.value);
+                                }}
+                                placeholder="PIN Code"
+                                aria-label="Service PIN code"
+                                className={`col-span-2 min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs font-mono tabular-nums text-slate-800 outline-none focus:border-teal-600 ${
+                                  serviceFormErrors.postalCode
+                                    ? 'border-red-400'
+                                    : 'border-slate-200'
+                                }`}
+                              />
+                            </div>
+                            {(serviceFormErrors.streetAddress ||
+                              serviceFormErrors.cityState ||
+                              serviceFormErrors.postalCode) && (
+                              <p className="text-[11px] font-medium text-red-600">
+                                {serviceFormErrors.streetAddress ||
+                                  serviceFormErrors.cityState ||
+                                  serviceFormErrors.postalCode}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 5. Preferred Date & Configured Time Slots ONLY When Supplied */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <label
+                              htmlFor="service-preferred-date"
+                              className="text-xs font-extrabold text-[#0A2540]"
+                            >
+                              05. Preferred Service Date
+                            </label>
+                            <span className="text-[10.5px] text-slate-400">
+                              Subject to confirmation
+                            </span>
+                          </div>
+
+                          <input
+                            id="service-preferred-date"
+                            type="date"
+                            min={new Date().toISOString().slice(0, 10)}
+                            value={servicePreferredDate}
+                            onChange={(e) => {
+                              setServicePreferredDate(e.target.value);
+                              setServiceFormErrors((prev) => {
+                                const next = { ...prev };
+                                delete next.preferredDate;
+                                return next;
+                              });
+                            }}
+                            className={`w-full min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs font-mono tabular-nums text-[#0A2540] font-semibold outline-none focus:border-teal-600 ${
+                              serviceFormErrors.preferredDate
+                                ? 'border-red-400'
+                                : 'border-slate-200'
+                            }`}
+                          />
+                          {serviceFormErrors.preferredDate && (
+                            <p className="text-[11px] font-medium text-red-600">
+                              {serviceFormErrors.preferredDate}
+                            </p>
+                          )}
+
+                          {/* Time Slots: Shown ONLY when supplied by configured scheduling system */}
+                          {isCheckingSchedule ? (
+                            <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500">
+                              Checking scheduling configuration for PIN {servicePostalCode}...
+                            </div>
+                          ) : scheduleLookup.isConfigured &&
+                            scheduleLookup.availableSlots.length > 0 ? (
+                            <div className="space-y-2 pt-1">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-bold text-[#0A2540]">
+                                  Configured Preferred Time Slots
+                                </span>
+                                <span className="text-[10px] font-mono text-teal-700">
+                                  {scheduleLookup.source === 'firestore'
+                                    ? 'Live Firestore Roster'
+                                    : 'Configured Roster'}
+                                </span>
+                              </div>
+                              <div className="grid grid-cols-1 gap-1.5">
+                                {scheduleLookup.availableSlots.map((slot) => {
+                                  const chosen = serviceSelectedSlot === slot;
+                                  return (
+                                    <button
+                                      key={slot}
+                                      type="button"
+                                      onClick={() =>
+                                        setServiceSelectedSlot(chosen ? '' : slot)
+                                      }
+                                      className={`min-h-[44px] px-3 py-2 rounded-xl border text-left text-xs font-mono tabular-nums flex items-center justify-between transition-colors cursor-pointer ${
+                                        chosen
+                                          ? 'bg-teal-50 border-teal-600 text-[#0A2540] font-bold'
+                                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                                      }`}
+                                    >
+                                      <span>{slot}</span>
+                                      <span className="text-[10px] font-sans font-semibold text-teal-700">
+                                        {chosen ? 'Selected Preference' : 'Select'}
+                                      </span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <p className="text-[10.5px] text-slate-500 leading-snug">
+                                Selecting a slot records your preferred window. Your appointment is
+                                confirmed only after Service Desk technician assignment.
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600 leading-relaxed">
+                              Online time slots are not configured for this date and PIN. Submit your
+                              preferred date and Califnco Service Desk will call to confirm an
+                              available appointment window.
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 6. Contact Person & Phone Number */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <label
+                              htmlFor="service-contact-phone"
+                              className="text-xs font-extrabold text-[#0A2540]"
+                            >
+                              06. Contact Phone Number
+                            </label>
+                            <span className="text-[10.5px] text-slate-400">For Confirmation Call</span>
+                          </div>
+                          <input
+                            type="text"
+                            value={serviceContactName}
+                            onChange={(e) => {
+                              setServiceContactName(e.target.value);
+                              setServiceFormErrors((prev) => {
+                                const next = { ...prev };
+                                delete next.contactName;
+                                return next;
+                              });
+                            }}
+                            placeholder="On-site contact person name"
+                            aria-label="Contact person name"
+                            className={`w-full min-h-[44px] px-3 py-2 rounded-xl border bg-slate-50 text-xs text-slate-800 outline-none focus:border-teal-600 ${
+                              serviceFormErrors.contactName
+                                ? 'border-red-400'
+                                : 'border-slate-200'
+                            }`}
+                          />
+                          <div className="flex items-center border rounded-xl px-3 min-h-[44px] bg-slate-50 focus-within:border-teal-600 border-slate-200">
+                            <Phone className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
+                            <input
+                              id="service-contact-phone"
+                              type="tel"
+                              value={serviceContactPhone}
+                              onChange={(e) => {
+                                setServiceContactPhone(e.target.value);
+                                setServiceFormErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next.contactPhone;
+                                  return next;
+                                });
+                              }}
+                              placeholder="+91 98765 43210"
+                              className="w-full bg-transparent text-xs font-mono tabular-nums text-slate-800 outline-none"
+                            />
+                          </div>
+                          {(serviceFormErrors.contactName || serviceFormErrors.contactPhone) && (
+                            <p className="text-[11px] font-medium text-red-600">
+                              {serviceFormErrors.contactName || serviceFormErrors.contactPhone}
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Unconfirmed Appointment Disclosure */}
+                        <div className="p-3 rounded-2xl bg-amber-50/70 border border-amber-200 text-[11px] text-amber-950 leading-relaxed">
+                          <span className="font-bold">Important:</span> Submitting this request does
+                          not lock a guaranteed technician arrival time. Appointment times are
+                          confirmed only after dispatch verification.
+                        </div>
+                      </div>
+
+                      {/* Sticky Submit Footer */}
+                      <div className="bg-white border-t border-slate-200 px-4 py-3 shrink-0">
+                        <button
+                          type="button"
+                          disabled={isSubmittingService}
+                          onClick={handleServiceBookingSubmit}
+                          className="w-full min-h-[48px] rounded-xl bg-[#0A2540] hover:bg-[#061B2E] disabled:opacity-60 text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                        >
+                          {isSubmittingService ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                              <span>Saving Service Request...</span>
+                            </>
+                          ) : (
+                            <span>Submit Request</span>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* ================= SCREEN 24: BOOKING CONFIRMATION ================= */}
+                {currentScreen === 'booking_confirmation' && (() => {
+                  const booking = activeBookingForConfirmation;
+                  const isConfirmedAppointment =
+                    booking.status === 'scheduled' || booking.status === 'in_progress';
+
+                  return (
+                    <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+                      {/* App Bar */}
+                      <div className="bg-white px-4 h-14 border-b border-slate-100 flex items-center justify-between shrink-0">
+                        <h2 className="text-sm font-extrabold text-[#0A2540] truncate">
+                          {isConfirmedAppointment
+                            ? 'Appointment Confirmed'
+                            : 'Service Request Submitted'}
+                        </h2>
+                        <span className="text-[10.5px] font-mono tabular-nums text-slate-500">
+                          {booking.persistedToFirestore ? 'Firestore Synced' : 'Preview Record'}
+                        </span>
+                      </div>
+
+                      {/* Scrollable Confirmation Details */}
+                      <div className="flex-1 overflow-y-auto p-3.5 space-y-3 pb-6">
+                        {/* Clear Distinction Banner: Submitted Request vs Confirmed Appointment */}
+                        <div
+                          className={`p-4 rounded-2xl border bg-white space-y-2.5 ${
+                            isConfirmedAppointment ? 'border-teal-600' : 'border-amber-300'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div
+                              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                                isConfirmedAppointment
+                                  ? 'bg-teal-50 text-teal-700'
+                                  : 'bg-amber-50 text-amber-700'
+                              }`}
+                            >
+                              {isConfirmedAppointment ? (
+                                <CheckCircle2 className="w-5 h-5" />
+                              ) : (
+                                <Clock className="w-5 h-5" />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs font-extrabold text-[#0A2540]">
+                                {isConfirmedAppointment
+                                  ? 'Confirmed Technician Appointment'
+                                  : 'Request Submitted — Appointment Not Yet Confirmed'}
+                              </div>
+                              <div className="text-[11px] font-mono tabular-nums font-bold text-teal-700 mt-0.5">
+                                Ref: {booking.ticketNumber}
+                              </div>
+                            </div>
+                          </div>
+
+                          <p className="text-[11px] text-slate-600 leading-relaxed">
+                            {isConfirmedAppointment
+                              ? 'Califnco Service Desk has verified technician availability and confirmed your scheduled visit.'
+                              : 'Your request has been logged in our queue, but no technician arrival time is promised yet. A coordinator will confirm availability with you.'}
+                          </p>
+                        </div>
+
+                        {/* Request Summary Card */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2.5 text-xs">
+                          <h3 className="font-extrabold text-xs text-[#0A2540]">
+                            Booking Details
+                          </h3>
+                          <dl className="divide-y divide-slate-100 text-[11.5px]">
+                            <div className="py-2 flex justify-between gap-3">
+                              <dt className="text-slate-500">Request Reference</dt>
+                              <dd className="font-mono tabular-nums font-bold text-[#0A2540] text-right">
+                                {booking.ticketNumber}
+                              </dd>
+                            </div>
+                            <div className="py-2 flex justify-between gap-3">
+                              <dt className="text-slate-500">Current Status</dt>
+                              <dd
+                                className={`font-bold text-right ${
+                                  isConfirmedAppointment ? 'text-teal-700' : 'text-amber-700'
+                                }`}
+                              >
+                                {booking.status === 'open'
+                                  ? 'Request Submitted (Unconfirmed)'
+                                  : booking.status === 'scheduled'
+                                  ? 'Appointment Confirmed'
+                                  : booking.status === 'in_progress'
+                                  ? 'Technician On-Site'
+                                  : booking.status === 'completed'
+                                  ? 'Completed'
+                                  : 'Cancelled'}
+                              </dd>
+                            </div>
+                            <div className="py-2 flex justify-between gap-3">
+                              <dt className="text-slate-500">Requested Service</dt>
+                              <dd className="font-semibold text-[#0A2540] text-right">
+                                {booking.requestCategory}
+                              </dd>
+                            </div>
+                            {booking.productModel && (
+                              <div className="py-2 flex justify-between gap-3">
+                                <dt className="text-slate-500 shrink-0">Product</dt>
+                                <dd className="font-medium text-slate-800 text-right">
+                                  {booking.productModel}
+                                </dd>
+                              </div>
+                            )}
+                            <div className="py-2 flex justify-between gap-3">
+                              <dt className="text-slate-500">
+                                {isConfirmedAppointment ? 'Confirmed Date' : 'Preferred Date'}
+                              </dt>
+                              <dd className="font-mono tabular-nums font-semibold text-[#0A2540] text-right">
+                                {booking.preferredDateIso || 'Flexible'}
+                              </dd>
+                            </div>
+                            {booking.preferredTimeSlot && (
+                              <div className="py-2 flex justify-between gap-3">
+                                <dt className="text-slate-500">
+                                  {isConfirmedAppointment
+                                    ? 'Confirmed Time'
+                                    : 'Preferred Window (Unconfirmed)'}
+                                </dt>
+                                <dd className="font-mono tabular-nums font-medium text-slate-800 text-right">
+                                  {booking.preferredTimeSlot}
+                                </dd>
+                              </div>
+                            )}
+                            <div className="py-2 space-y-1">
+                              <dt className="text-slate-500">Service Address</dt>
+                              <dd className="font-medium text-slate-800 leading-snug">
+                                {booking.serviceAddress}
+                              </dd>
+                            </div>
+                            {booking.contactPhone && (
+                              <div className="py-2 flex justify-between gap-3">
+                                <dt className="text-slate-500">Contact Phone</dt>
+                                <dd className="font-mono tabular-nums text-slate-800">
+                                  {booking.contactPhone}
+                                </dd>
+                              </div>
+                            )}
+                          </dl>
+                        </div>
+
+                        {/* Next Steps */}
+                        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 space-y-2 text-xs">
+                          <h3 className="font-extrabold text-xs text-[#0A2540]">Next Steps</h3>
+                          {isConfirmedAppointment ? (
+                            <ol className="space-y-2 text-[11px] text-slate-600 leading-relaxed">
+                              <li className="flex gap-2">
+                                <span className="font-mono font-bold text-teal-700">01.</span>
+                                <span>
+                                  Your assigned Califnco specialist calls 30 minutes before arrival.
+                                </span>
+                              </li>
+                              <li className="flex gap-2">
+                                <span className="font-mono font-bold text-teal-700">02.</span>
+                                <span>
+                                  Keep water inlet valve and electrical socket accessible near the
+                                  unit.
+                                </span>
+                              </li>
+                              <li className="flex gap-2">
+                                <span className="font-mono font-bold text-teal-700">03.</span>
+                                <span>
+                                  Post-service TDS reading and service notes are recorded upon
+                                  completion.
+                                </span>
+                              </li>
+                            </ol>
+                          ) : (
+                            <ol className="space-y-2 text-[11px] text-slate-600 leading-relaxed">
+                              <li className="flex gap-2">
+                                <span className="font-mono font-bold text-teal-700">01.</span>
+                                <span>
+                                  Califnco Service Desk checks regional technician availability for
+                                  your PIN code.
+                                </span>
+                              </li>
+                              <li className="flex gap-2">
+                                <span className="font-mono font-bold text-teal-700">02.</span>
+                                <span>
+                                  A coordinator calls {booking.contactPhone || 'your number'} to
+                                  confirm a guaranteed date and arrival window.
+                                </span>
+                              </li>
+                              <li className="flex gap-2">
+                                <span className="font-mono font-bold text-teal-700">03.</span>
+                                <span>
+                                  Once confirmed by Service Desk, status changes to Appointment
+                                  Confirmed.
+                                </span>
+                              </li>
+                            </ol>
+                          )}
+                        </div>
+
+                        {/* Primary & Secondary CTAs */}
+                        <div className="space-y-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setIsMyRequestsDrawerOpen(true)}
+                            className="w-full min-h-[46px] rounded-xl border border-[#0A2540] bg-white hover:bg-slate-50 text-[#0A2540] font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          >
+                            <FileText className="w-4 h-4" />
+                            <span>View My Requests ({allMyServiceRequests.length})</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCurrentScreen('home')}
+                            className="w-full min-h-[46px] rounded-xl bg-[#0A2540] hover:bg-[#061B2E] text-white font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          >
+                            <Home className="w-4 h-4" />
+                            <span>Return Home</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Modal Sheet: View My Requests (ServiceRepository Stream) */}
+                {isMyRequestsDrawerOpen && (
+                  <div className="absolute inset-0 bg-black/50 z-40 flex items-end">
+                    <div className="w-full bg-white rounded-t-3xl p-4 shadow-2xl max-h-[82%] flex flex-col">
+                      <div className="w-10 h-1 bg-slate-300 rounded-full mx-auto mb-3 shrink-0" />
+                      <div className="flex items-center justify-between pb-2.5 border-b border-slate-100 shrink-0">
+                        <div>
+                          <h3 className="font-extrabold text-sm text-[#0A2540]">
+                            My Service Requests
+                          </h3>
+                          <p className="text-[10.5px] text-slate-500">
+                            {firebaseUser
+                              ? 'Synced via ServiceRepository (Cloud Firestore)'
+                              : 'Session requests · Connect Google Auth for live cloud sync'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsMyRequestsDrawerOpen(false)}
+                          aria-label="Close My Service Requests"
+                          className="w-9 h-9 rounded-lg flex items-center justify-center text-slate-500 hover:bg-slate-100 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto py-3 space-y-2">
+                        {allMyServiceRequests.length === 0 ? (
+                          <div className="py-8 text-center space-y-2">
+                            <p className="text-xs font-bold text-[#0A2540]">
+                              No Service Requests Submitted Yet
+                            </p>
+                            <p className="text-[11px] text-slate-500 max-w-[240px] mx-auto">
+                              Submit an Installation, Maintenance, or Repair booking on Screen 23 to
+                              track it here.
+                            </p>
+                          </div>
+                        ) : (
+                          allMyServiceRequests.map((req) => {
+                            const confirmed =
+                              req.status === 'scheduled' || req.status === 'in_progress';
+                            return (
+                              <button
+                                key={req.id}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedBookingRecord(req);
+                                  setIsMyRequestsDrawerOpen(false);
+                                  setCurrentScreen('booking_confirmation');
+                                }}
+                                className="w-full text-left p-3 rounded-2xl border border-slate-200 hover:border-teal-500 bg-slate-50/70 space-y-1 transition-colors cursor-pointer"
+                              >
+                                <div className="flex items-center justify-between gap-2 text-[11px]">
+                                  <span className="font-mono tabular-nums font-bold text-[#0A2540]">
+                                    {req.ticketNumber} · {req.requestCategory}
+                                  </span>
+                                  <span
+                                    className={`font-semibold ${
+                                      confirmed ? 'text-teal-700' : 'text-amber-700'
+                                    }`}
+                                  >
+                                    {confirmed ? 'Confirmed' : 'Unconfirmed'}
+                                  </span>
+                                </div>
+                                <p className="text-xs font-semibold text-slate-800 truncate">
+                                  {req.productModel}
+                                </p>
+                                <p className="text-[10.5px] font-mono tabular-nums text-slate-500">
+                                  Preferred: {req.preferredDateIso}
+                                  {req.preferredTimeSlot ? ` · ${req.preferredTimeSlot}` : ''}
+                                </p>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-100 flex gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsMyRequestsDrawerOpen(false);
+                            setCurrentScreen('service_booking');
+                          }}
+                          className="flex-1 min-h-[44px] rounded-xl bg-[#0A2540] text-white font-bold text-xs cursor-pointer"
+                        >
+                          New Service Booking
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Modal: Add / Edit Address Dialog */}
                 {isAddressModalOpen && (
                   <div className="absolute inset-0 bg-black/50 z-40 flex items-end">
@@ -4968,43 +6094,138 @@ class OrderDetailViewScreen extends StatelessWidget {
 
             {/* Testbench Panel & Quick Controls */}
             <div className="w-full lg:w-96 flex flex-col gap-4">
+              {/* Device Viewport Switcher */}
+              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 flex items-center justify-between gap-2 text-xs">
+                <span className="text-slate-400 font-medium">Viewport</span>
+                <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5">
+                  {(['pixel', 'galaxy', 'compact'] as const).map((model) => (
+                    <button
+                      key={model}
+                      type="button"
+                      onClick={() => setDeviceModel(model)}
+                      className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer whitespace-nowrap ${
+                        deviceModel === model
+                          ? 'bg-slate-800 text-white font-semibold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {model === 'pixel'
+                        ? 'Pixel 8 Pro'
+                        : model === 'galaxy'
+                        ? 'Galaxy S24'
+                        : '360dp'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Screen Navigator */}
               <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-teal-400">
-                    All 16 Implemented Screens
+                  <h3 className="text-xs font-semibold text-teal-400">
+                    Mobile Application Screens
                   </h3>
-                  <span className="text-[10px] text-teal-400 font-mono font-bold">16 of 16 screens</span>
+                  <span className="text-[11px] text-slate-400 font-mono tabular-nums">
+                    Screens 1–18, 23–24
+                  </span>
                 </div>
 
                 <div className="max-h-64 overflow-y-auto space-y-2.5 pr-1 text-xs">
-                  {/* Segment 8 */}
+                  {/* Segment 10: Active */}
                   <div>
-                    <div className="text-[10px] font-bold text-teal-400 uppercase tracking-wider mb-1 flex items-center justify-between">
-                      <span>Segment 8 (Current Segment)</span>
-                      <span className="text-[9px] px-1.5 py-0.2 bg-teal-950 border border-teal-800 rounded text-teal-300">Active</span>
+                    <div className="text-[10.5px] font-semibold text-teal-300 mb-1 flex items-center justify-between">
+                      <span>Segment 10: Service Booking</span>
+                      <span className="text-[10px] text-teal-400 font-mono">Current</span>
                     </div>
                     <div className="grid grid-cols-2 gap-1.5">
                       <button
-                        onClick={() => setCurrentScreen('dealer_home')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
-                          currentScreen === 'dealer_home'
+                        type="button"
+                        onClick={() => setCurrentScreen('service_booking')}
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          currentScreen === 'service_booking'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
                         }`}
                       >
-                        <div className="text-[9px] text-teal-400">Screen 15 (New)</div>
+                        <div className="text-[9.5px] text-teal-400 font-mono">Screen 23</div>
+                        <div className="truncate text-[11px]">Service Booking</div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('booking_confirmation')}
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          currentScreen === 'booking_confirmation'
+                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
+                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-[9.5px] text-teal-400 font-mono">Screen 24</div>
+                        <div className="truncate text-[11px]">Confirmation</div>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Segment 9 */}
+                  <div>
+                    <div className="text-[10.5px] font-semibold text-slate-400 mb-1">
+                      Segment 9: Bulk Procurement
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('bulk_order_cart')}
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          currentScreen === 'bulk_order_cart'
+                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 17</div>
+                        <div className="truncate text-[11px]">Bulk Cart</div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('dealer_order_history')}
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          currentScreen === 'dealer_order_history'
+                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 18</div>
+                        <div className="truncate text-[11px]">Dealer PO History</div>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Segment 8 */}
+                  <div>
+                    <div className="text-[10.5px] font-semibold text-slate-400 mb-1">
+                      Segment 8: Dealer Hub &amp; Wholesale
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setCurrentScreen('dealer_home')}
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          currentScreen === 'dealer_home'
+                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 15</div>
                         <div className="truncate text-[11px]">Dealer Hub</div>
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('wholesale_catalog')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'wholesale_catalog'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9px] text-teal-400">Screen 16 (New)</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 16</div>
                         <div className="truncate text-[11px]">Wholesale Catalog</div>
                       </button>
                     </div>
@@ -5012,28 +6233,32 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                   {/* Segment 7 */}
                   <div>
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Segment 7: Profile & Addresses</div>
+                    <div className="text-[10.5px] font-semibold text-slate-400 mb-1">
+                      Segment 7: Profile &amp; Addresses
+                    </div>
                     <div className="grid grid-cols-2 gap-1.5">
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('profile')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'profile'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9px] text-slate-500">Screen 13</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 13</div>
                         <div className="truncate text-[11px]">Customer Profile</div>
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('address_management')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'address_management'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9px] text-slate-500">Screen 14</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 14</div>
                         <div className="truncate text-[11px]">Saved Addresses</div>
                       </button>
                     </div>
@@ -5041,299 +6266,226 @@ class OrderDetailViewScreen extends StatelessWidget {
 
                   {/* Segment 6 */}
                   <div>
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Segment 6: Orders & Tracking</div>
+                    <div className="text-[10.5px] font-semibold text-slate-400 mb-1">
+                      Segment 6: Orders &amp; Tracking
+                    </div>
                     <div className="grid grid-cols-2 gap-1.5">
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('order_history')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'order_history'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9px] text-slate-500">Screen 11</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 11</div>
                         <div className="truncate text-[11px]">Order History</div>
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('order_detail_view')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'order_detail_view'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9px] text-slate-500">Screen 12</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 12</div>
                         <div className="truncate text-[11px]">Order Details</div>
                       </button>
                     </div>
                   </div>
 
-                  {/* Segment 5 */}
+                  {/* Segment 3–5 */}
                   <div>
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Segment 5: Checkout & Razorpay</div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <button
-                        onClick={() => setCurrentScreen('checkout')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
-                          currentScreen === 'checkout'
-                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
-                        }`}
-                      >
-                        <div className="text-[9px] text-slate-500">Screen 9</div>
-                        <div className="truncate text-[11px]">Checkout</div>
-                      </button>
-                      <button
-                        onClick={() => setCurrentScreen('order_confirmation')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
-                          currentScreen === 'order_confirmation'
-                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
-                        }`}
-                      >
-                        <div className="text-[9px] text-slate-500">Screen 10</div>
-                        <div className="truncate text-[11px]">Confirmation</div>
-                      </button>
+                    <div className="text-[10.5px] font-semibold text-slate-400 mb-1">
+                      Segments 1–5: Auth, Catalog &amp; Checkout
                     </div>
-                  </div>
-
-                  {/* Segment 4 */}
-                  <div>
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Segment 4: Details & Cart</div>
                     <div className="grid grid-cols-2 gap-1.5">
                       <button
-                        onClick={() => setCurrentScreen('details')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
-                          currentScreen === 'details'
-                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
-                        }`}
-                      >
-                        <div className="text-[9px] text-slate-500">Screen 7</div>
-                        <div className="truncate text-[11px]">Product Details</div>
-                      </button>
-                      <button
-                        onClick={() => setCurrentScreen('cart')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
-                          currentScreen === 'cart'
-                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
-                        }`}
-                      >
-                        <div className="text-[9px] text-slate-500">Screen 8</div>
-                        <div className="truncate text-[11px]">Shopping Cart</div>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Segment 3 */}
-                  <div>
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Segment 3: Home & Catalog</div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <button
+                        type="button"
                         onClick={() => setCurrentScreen('home')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'home'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9px] text-slate-500">Screen 5</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 5</div>
                         <div className="truncate text-[11px]">Customer Home</div>
                       </button>
                       <button
+                        type="button"
                         onClick={() => setCurrentScreen('catalog')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'catalog'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9px] text-slate-500">Screen 6</div>
-                        <div className="truncate text-[11px]">50+ Catalog</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 6</div>
+                        <div className="truncate text-[11px]">Water Catalog</div>
                       </button>
-                    </div>
-                  </div>
-
-                  {/* Segments 1 & 2 */}
-                  <div>
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Segments 1 & 2: Auth Flow</div>
-                    <div className="grid grid-cols-2 gap-1.5">
                       <button
+                        type="button"
+                        onClick={() => setCurrentScreen('checkout')}
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          currentScreen === 'checkout'
+                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
+                        }`}
+                      >
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 9</div>
+                        <div className="truncate text-[11px]">Checkout</div>
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => setCurrentScreen('welcome')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
+                        className={`py-1.5 px-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                           currentScreen === 'welcome'
                             ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                            : 'bg-slate-900 border-slate-800 text-slate-400'
                         }`}
                       >
-                        <div className="text-[9px] text-slate-500">Screen 1</div>
-                        <div className="truncate text-[11px]">Welcome</div>
-                      </button>
-                      <button
-                        onClick={() => setCurrentScreen('login')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
-                          currentScreen === 'login'
-                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
-                        }`}
-                      >
-                        <div className="text-[9px] text-slate-500">Screen 2</div>
-                        <div className="truncate text-[11px]">Role Login</div>
-                      </button>
-                      <button
-                        onClick={() => setCurrentScreen('register')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
-                          currentScreen === 'register'
-                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
-                        }`}
-                      >
-                        <div className="text-[9px] text-slate-500">Screen 3</div>
-                        <div className="truncate text-[11px]">Register</div>
-                      </button>
-                      <button
-                        onClick={() => setCurrentScreen('forgot_password')}
-                        className={`py-1.5 px-2 rounded-lg border text-left transition-all ${
-                          currentScreen === 'forgot_password'
-                            ? 'bg-teal-500/20 border-teal-500 text-teal-300 font-bold'
-                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
-                        }`}
-                      >
-                        <div className="text-[9px] text-slate-500">Screen 4</div>
-                        <div className="truncate text-[11px]">Forgot Pass</div>
+                        <div className="text-[9.5px] text-slate-500 font-mono">Screen 1</div>
+                        <div className="truncate text-[11px]">Welcome / Auth</div>
                       </button>
                     </div>
                   </div>
                 </div>
               </div>
 
-              {/* Assessment Interactive Testing */}
+              {/* Screens 23 & 24 Interactive Verification Scenarios */}
               <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <KeyRound className="w-4 h-4 text-teal-400" />
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                    Segment 8 Interactive Tests
-                  </h3>
-                </div>
+                <h3 className="text-xs font-semibold text-slate-200 mb-3">
+                  Screens 23 &amp; 24 Verification Scenarios
+                </h3>
 
                 <div className="space-y-2">
                   <button
-                    onClick={() => {
-                      setDealerProfile({ ...dealerProfile, approvalStatus: 'approved' });
-                      setCurrentScreen('dealer_home');
-                      showToast('Status: Approved Dealer (Wholesale Active)');
-                    }}
-                    className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="font-semibold text-slate-200">1. Approved Dealer Hub</div>
-                      <div className="text-[11px] text-slate-400">Shows Tier 1 partner metrics, credit & wholesale entry</div>
-                    </div>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold">
-                      Approved
-                    </span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setDealerProfile({ ...dealerProfile, approvalStatus: 'pending' });
-                      setCurrentScreen('dealer_home');
-                      showToast('Status: Approval Pending (Wholesale Locked)');
-                    }}
-                    className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="font-semibold text-slate-200">2. Pending Approval Restriction</div>
-                      <div className="text-[11px] text-slate-400">Displays compliance warning and locks wholesale catalog</div>
-                    </div>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 font-bold">
-                      Pending
-                    </span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setDealerProfile({ ...dealerProfile, approvalStatus: 'rejected' });
-                      setCurrentScreen('dealer_home');
-                      showToast('Status: Application Rejected (Access Denied)');
-                    }}
-                    className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="font-semibold text-slate-200">3. Rejected Dealer State</div>
-                      <div className="text-[11px] text-slate-400">Shows rejection notice and disables ordering privileges</div>
-                    </div>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-red-950 text-red-400 border border-red-800 font-bold">
-                      Rejected
-                    </span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setDealerProfile({ ...dealerProfile, approvalStatus: 'approved' });
-                      setCurrentScreen('wholesale_catalog');
-                      showToast('Opened Wholesale Catalog with Tier 1 margins.');
-                    }}
-                    className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="font-semibold text-slate-200">4. Wholesale Catalog & MOQs</div>
-                      <div className="text-[11px] text-slate-400">Tests 38%-52% margins & Minimum Order enforcement</div>
-                    </div>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-teal-950 text-teal-400 border border-teal-800 font-bold">
-                      Catalog
-                    </span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setDealerProfile({ ...dealerProfile, approvalStatus: 'approved' });
-                      setWholesaleCart({
-                        'wp-01': 10,
-                        'fl-01': 40,
-                        'pm-01': 20,
+                    type="button"
+                    onClick={async () => {
+                      const nextEnabled = !simulatedScheduleEnabled;
+                      setSimulatedScheduleEnabled(nextEnabled);
+                      await setFirestoreScheduleConfigForTesting({
+                        dateIso: servicePreferredDate,
+                        postalCode: servicePostalCode,
+                        enable: nextEnabled,
                       });
-                      setCurrentScreen('wholesale_catalog');
-                      showToast('Populated wholesale bulk order with 70 units!');
+                      setCurrentScreen('service_booking');
+                      showToast(
+                        nextEnabled
+                          ? 'Configured scheduling slots enabled for current date & PIN.'
+                          : 'Scheduling system unconfigured: time slots hidden (no slot promised).'
+                      );
                     }}
-                    className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between"
+                    className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer"
                   >
                     <div>
-                      <div className="font-semibold text-slate-200">5. Bulk Order Line Items & PO</div>
-                      <div className="text-[11px] text-slate-400">Tests wholesale cart accumulation & dynamic pricing</div>
+                      <div className="font-semibold text-slate-200">
+                        01. Toggle Configured Scheduling System
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        {simulatedScheduleEnabled || scheduleLookup.isConfigured
+                          ? 'Active: Supplying time slots from schedule config'
+                          : 'Default Off: Hides time slots when unconfigured'}
+                      </div>
                     </div>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800 font-bold">
-                      Bulk Order
+                    <span className="text-[10.5px] font-mono text-teal-400 shrink-0">
+                      {simulatedScheduleEnabled || scheduleLookup.isConfigured ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCurrentScreen('service_booking');
+                      setServiceCategory('Repair');
+                      setServiceProductId('wp-01');
+                      setServiceProductModel('Califnco Hydra Pure Elite RO+UV+Copper');
+                      setServiceDescription('Short');
+                      setServiceContactPhone('12345');
+                      const errs = validateMobileServiceBookingForm({
+                        category: 'Repair',
+                        productId: 'wp-01',
+                        productModel: 'Califnco Hydra Pure Elite RO+UV+Copper',
+                        issueDescription: 'Short',
+                        streetAddress: serviceStreetAddress,
+                        cityState: serviceCityState,
+                        postalCode: servicePostalCode,
+                        preferredDateIso: servicePreferredDate,
+                        preferredTimeSlot: '',
+                        isScheduleConfigured: false,
+                        configuredSlots: [],
+                        contactName: serviceContactName,
+                        contactPhone: '12345',
+                      });
+                      setServiceFormErrors(errs);
+                      setServiceSubmitError(
+                        'Validation blocked submission: inspect inline errors on description and phone.'
+                      );
+                    }}
+                    className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer"
+                  >
+                    <div>
+                      <div className="font-semibold text-slate-200">
+                        02. Trigger Form Validation Guards
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Tests minimum issue description &amp; phone validation
+                      </div>
+                    </div>
+                    <span className="text-[10.5px] font-mono text-amber-400 shrink-0">Test</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextStatus =
+                        activeBookingForConfirmation.status === 'scheduled'
+                          ? 'open'
+                          : 'scheduled';
+                      setSelectedBookingRecord({
+                        ...activeBookingForConfirmation,
+                        status: nextStatus,
+                      });
+                      setCurrentScreen('booking_confirmation');
+                      showToast(
+                        nextStatus === 'scheduled'
+                          ? 'Previewing Confirmed Appointment state (status: scheduled).'
+                          : 'Previewing Submitted Request state (status: open — unconfirmed).'
+                      );
+                    }}
+                    className="w-full text-left p-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer"
+                  >
+                    <div>
+                      <div className="font-semibold text-slate-200">
+                        03. Compare Submitted vs Confirmed State
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Toggles Screen 24 between Open Request &amp; Confirmed Slot
+                      </div>
+                    </div>
+                    <span className="text-[10.5px] font-mono text-teal-400 shrink-0">
+                      {activeBookingForConfirmation.status === 'scheduled'
+                        ? 'Scheduled'
+                        : 'Open'}
                     </span>
                   </button>
                 </div>
               </div>
 
-              {/* Security Audit Badge */}
-              <div className="bg-slate-950/60 border border-slate-800/80 rounded-2xl p-4 text-xs">
-                <div className="flex items-center gap-2 text-teal-400 font-semibold mb-2">
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>Security & Isolation Enforcement</span>
+              {/* Firestore & Security Rules Notes */}
+              <div className="bg-slate-950/60 border border-slate-800/80 rounded-2xl p-4 text-xs space-y-1.5">
+                <div className="font-semibold text-teal-400">
+                  Zero-Trust Service Booking Rules
                 </div>
-                <ul className="space-y-1.5 text-slate-400 text-[11px]">
-                  <li className="flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                    <span>Dealer wholesale pricing is server-authoritative in <code>dealerPrice</code> and guarded by custom claims</span>
-                  </li>
-                  <li className="flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                    <span>Ordinary customers cannot access wholesale margins via client tampering</span>
-                  </li>
-                  <li className="flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                    <span>Wholesale ordering privileges strictly require <code>approvalStatus == 'approved'</code></span>
-                  </li>
-                  <li className="flex items-center gap-1.5">
-                    <Check className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                    <span>Minimum Order Quantity (MOQ) logic is clamped at data model and UI steppers</span>
-                  </li>
-                </ul>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Customer writes to <code>/service_requests</code> enforce{' '}
+                  <code>status == &apos;open&apos;</code> and atomic PII isolation in{' '}
+                  <code>private_details/contact</code>. Customers cannot self-confirm appointments.
+                </p>
               </div>
             </div>
           </div>
@@ -5343,25 +6495,80 @@ class OrderDetailViewScreen extends StatelessWidget {
         {activeTab === 'code' && (
           <div className="flex-1 flex flex-col md:flex-row overflow-hidden bg-slate-950">
             {/* File List */}
-            <div className="w-full md:w-72 border-r border-slate-800 bg-slate-900/50 p-4 overflow-y-auto">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
-                Segment 8 Files
-              </h3>
-              <div className="space-y-1">
-                {Object.keys(flutterFiles).map((fileName) => (
+            <div className="w-full md:w-80 border-r border-slate-800 bg-slate-900/50 p-4 overflow-y-auto space-y-4">
+              <div className="space-y-1.5">
+                <div className="text-[11px] font-semibold text-slate-400">Flutter Segment</div>
+                <div className="grid grid-cols-3 gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800 text-[11px]">
                   <button
-                    key={fileName}
-                    onClick={() => setSelectedCodeFile(fileName)}
-                    className={`w-full text-left px-3 py-2 rounded-xl text-xs font-mono transition-all flex items-center justify-between ${
-                      selectedCodeFile === fileName
-                        ? 'bg-teal-500/20 text-teal-300 font-bold border border-teal-500/40'
-                        : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
+                    type="button"
+                    onClick={() => {
+                      setSegmentCodeTab('segment10');
+                      setSelectedCodeFile('service_booking_screen.dart');
+                    }}
+                    className={`py-1.5 rounded font-semibold cursor-pointer ${
+                      segmentCodeTab === 'segment10'
+                        ? 'bg-teal-500 text-slate-950'
+                        : 'text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    <span className="truncate">{fileName}</span>
-                    <ChevronRight className="w-3.5 h-3.5 opacity-50 shrink-0" />
+                    Seg 10 (23–24)
                   </button>
-                ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSegmentCodeTab('segment9');
+                      setSelectedCodeFile('bulk_order_cart_screen.dart');
+                    }}
+                    className={`py-1.5 rounded font-semibold cursor-pointer ${
+                      segmentCodeTab === 'segment9'
+                        ? 'bg-teal-500 text-slate-950'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Seg 9 (17–18)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSegmentCodeTab('segment8');
+                      setSelectedCodeFile('dealer_home_screen.dart');
+                    }}
+                    className={`py-1.5 rounded font-semibold cursor-pointer ${
+                      segmentCodeTab === 'segment8'
+                        ? 'bg-teal-500 text-slate-950'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Seg 8 (15–16)
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <h3 className="text-xs font-semibold text-slate-300 mb-2">
+                  {segmentCodeTab === 'segment10'
+                    ? 'Screens 23 & 24 Dart Files'
+                    : segmentCodeTab === 'segment9'
+                    ? 'Screens 17 & 18 Dart Files'
+                    : 'Screens 15 & 16 Dart Files'}
+                </h3>
+                <div className="space-y-1">
+                  {Object.keys(flutterFiles).map((fileName) => (
+                    <button
+                      key={fileName}
+                      type="button"
+                      onClick={() => setSelectedCodeFile(fileName)}
+                      className={`w-full text-left px-3 py-2 rounded-xl text-xs font-mono transition-all flex items-center justify-between cursor-pointer ${
+                        selectedCodeFile === fileName
+                          ? 'bg-teal-500/20 text-teal-300 font-bold border border-teal-500/40'
+                          : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'
+                      }`}
+                    >
+                      <span className="truncate">{fileName}</span>
+                      <ChevronRight className="w-3.5 h-3.5 opacity-50 shrink-0" />
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -5372,10 +6579,11 @@ class OrderDetailViewScreen extends StatelessWidget {
                   {flutterFiles[selectedCodeFile]?.path}
                 </span>
                 <button
+                  type="button"
                   onClick={() =>
                     copyCode(selectedCodeFile, flutterFiles[selectedCodeFile]?.content || '')
                   }
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors"
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors cursor-pointer"
                 >
                   {copiedFile === selectedCodeFile ? (
                     <>
@@ -5400,70 +6608,75 @@ class OrderDetailViewScreen extends StatelessWidget {
 
         {/* Verification & Guide Tab */}
         {activeTab === 'instructions' && (
-          <div className="flex-1 p-8 overflow-y-auto max-w-4xl mx-auto">
-            <h2 className="text-xl font-bold text-white mb-2">Segment 8 Dealer Dashboard & Wholesale Catalog Guide</h2>
-            <p className="text-sm text-slate-400 mb-6">
-              Instructions for verifying Screen 15 (Dealer Home) and Screen 16 (Wholesale Catalog).
-            </p>
+          <div className="flex-1 p-8 overflow-y-auto max-w-4xl mx-auto space-y-6">
+            <div>
+              <h2 className="text-xl font-bold text-white">
+                Screens 23 &amp; 24 — Service Booking &amp; Confirmation Testing Guide
+              </h2>
+              <p className="text-sm text-slate-400 mt-1">
+                End-to-end verification steps for Flutter mobile service booking, schedule slot
+                gating, Cloud Firestore persistence, and appointment status distinction.
+              </p>
+            </div>
 
-            <div className="space-y-6">
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5">
-                <h3 className="text-sm font-semibold text-teal-400 mb-2">1. Server-Authoritative Wholesale Pricing & Security Rules</h3>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Both retail and wholesale pricing are defined on the unified <code>Product</code> model (<code>retailPrice</code> and <code>dealerPrice</code>). However, wholesale margins and bulk ordering privileges are strictly gated on the backend by verifying both the user's role and their administrative approval status:
-                </p>
-                <div className="bg-slate-900 p-3 rounded-xl font-mono text-xs text-slate-300 mt-2 space-y-1">
-                  <div>// Firestore Security Rules for Wholesale Catalog</div>
-                  <div>match /dealers/{`{dealerId}`} &#123;</div>
-                  <div className="pl-4">allow read: if request.auth != null && (request.auth.uid == dealerId || request.auth.token.role == 'admin');</div>
-                  <div className="pl-4">allow write: if request.auth != null && request.auth.token.role == 'admin'; // Only admin can approve dealers</div>
-                  <div>&#125;</div>
-                </div>
-              </div>
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 space-y-2.5 text-xs text-slate-300 leading-relaxed">
+              <h3 className="text-sm font-semibold text-teal-400">
+                01. Verify Unconfigured vs. Configured Scheduling System (Screen 23)
+              </h3>
+              <p>
+                By default, no active schedule document exists in{' '}
+                <code>/service_schedules/&#123;dateIso&#125;_&#123;postalCode&#125;</code>. Confirm
+                that Screen 23 hides time-slot chips and displays an explicit disclosure that a
+                coordinator will call to confirm availability. Next, click{' '}
+                <strong>01. Toggle Configured Scheduling System</strong> in the right-hand panel:
+                configured slots (<code>09:30 AM - 11:30 AM</code>,{' '}
+                <code>01:00 PM - 03:00 PM</code>, <code>04:00 PM - 06:00 PM</code>) appear as
+                optional preferences while still clearly stating they are not confirmed until
+                dispatch review.
+              </p>
+            </div>
 
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5">
-                <h3 className="text-sm font-semibold text-teal-400 mb-2">2. Minimum Order Quantity (MOQ) Clamping</h3>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Every product category enforces a Minimum Order Quantity (Water Purifiers: MOQ 5; Dispensers: MOQ 3; Filters: MOQ 20; Booster Pumps: MOQ 10). The quantity stepper does not allow values below MOQ, ensuring wholesale economics are respected at all times.
-                </p>
-              </div>
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 space-y-2.5 text-xs text-slate-300 leading-relaxed">
+              <h3 className="text-sm font-semibold text-teal-400">
+                02. Test Form Validation &amp; Live Cloud Firestore Write
+              </h3>
+              <p>
+                Click <strong>Connect Google Auth</strong> in the top bar, choose{' '}
+                <strong>Installation</strong>, <strong>Maintenance</strong>, or{' '}
+                <strong>Repair</strong>, select an applicable Califnco product, enter an issue
+                description (10–600 chars), verify your service address &amp; 10-digit phone number,
+                and tap <strong>Submit Request</strong>. The app executes an atomic Firestore{' '}
+                <code>WriteBatch</code> creating both{' '}
+                <code>/service_requests/&#123;requestId&#125;</code> (with{' '}
+                <code>status: &apos;open&apos;</code>) and isolated PII in{' '}
+                <code>/service_requests/&#123;requestId&#125;/private_details/contact</code>.
+              </p>
+            </div>
 
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5">
-                <h3 className="text-sm font-semibold text-teal-400 mb-2">3. Completed Califnco Application Screens</h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div className="p-3 bg-teal-950/40 border border-teal-800/60 rounded-xl">
-                    <div className="font-semibold text-teal-300">Completed (Segments 1–8):</div>
-                    <ul className="mt-1.5 space-y-1 text-slate-300 text-[11px]">
-                      <li>• Screen 1: Welcome / Onboarding</li>
-                      <li>• Screen 2: Role-Based Login Screen</li>
-                      <li>• Screen 3: Registration Screen</li>
-                      <li>• Screen 4: Forgot Password Screen</li>
-                      <li>• Screen 5: Customer Home Screen</li>
-                      <li>• Screen 6: Product Catalog Screen (50+ items)</li>
-                      <li>• Screen 7: Product Details Screen</li>
-                      <li>• Screen 8: Shopping Cart Screen</li>
-                      <li>• Screen 9: Checkout Screen (Razorpay Test Mode)</li>
-                      <li>• Screen 10: Order Confirmation Screen</li>
-                      <li>• Screen 11: Order History Screen</li>
-                      <li>• Screen 12: Order Details & Fulfilment Tracking</li>
-                      <li>• Screen 13: Customer Profile Screen</li>
-                      <li>• Screen 14: Address Management Screen</li>
-                      <li>• Screen 15: Dealer Home Dashboard (Current)</li>
-                      <li>• Screen 16: Wholesale Catalog & MOQs (Current)</li>
-                    </ul>
-                  </div>
-                  <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl">
-                    <div className="font-semibold text-slate-400">Architecture & Roles:</div>
-                    <ul className="mt-1.5 space-y-1 text-slate-400 text-[11px]">
-                      <li>• Customer Role: Retail pricing & personal orders</li>
-                      <li>• Dealer Role: Wholesale Tier 1 margins & MOQs</li>
-                      <li>• Admin Gate: Gated approval required for trade access</li>
-                      <li>• State: flutter_bloc with Cubits</li>
-                      <li>• Navigation: go_router with role auth redirects</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 space-y-2.5 text-xs text-slate-300 leading-relaxed">
+              <h3 className="text-sm font-semibold text-teal-400">
+                03. Verify Submitted Request vs. Confirmed Appointment (Screen 24 &amp; Admin Desk)
+              </h3>
+              <p>
+                After submitting, Screen 24 displays your reference (<code>SRV-2026-XXXX</code>) as{' '}
+                <strong>Request Submitted — Appointment Not Yet Confirmed</strong>. Open{' '}
+                <strong>Admin Console → Service Desk (Page 22)</strong>, locate your newly created
+                ticket, and transition its status from <code>open</code> to <code>scheduled</code>.
+                Return to Screen 24 (or tap <strong>View My Requests</strong>) to observe the live
+                stream update to <strong>Confirmed Technician Appointment</strong>.
+              </p>
+            </div>
+
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 space-y-2 text-xs text-slate-300">
+              <h3 className="text-sm font-semibold text-teal-400">
+                04. Running the Flutter Dart Implementation Locally
+              </h3>
+              <pre className="p-3 bg-slate-900 rounded-xl font-mono text-[11px] text-slate-300 overflow-x-auto">
+{`flutter pub get
+flutter analyze lib/features/service lib/core/router/service_router_routes.dart
+flutter test
+flutter run --dart-define=FIREBASE_DATABASE_ID=ai-studio-califnco-446b2980-82d0-4b7d-a0e2-2bbecc22b94c`}
+              </pre>
             </div>
           </div>
         )}
@@ -5471,3 +6684,4 @@ class OrderDetailViewScreen extends StatelessWidget {
     </div>
   );
 }
+

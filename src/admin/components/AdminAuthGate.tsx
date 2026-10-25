@@ -10,6 +10,7 @@ interface AdminAuthGateProps {
   onGoogleSignIn: () => void;
   onSignOut: () => void;
   onEnterDemoMode: () => void;
+  onOpenMobileStudio?: () => void;
 }
 
 export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
@@ -20,6 +21,7 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
   onGoogleSignIn,
   onSignOut,
   onEnterDemoMode,
+  onOpenMobileStudio,
 }) => {
   if (authLoading) {
     return (
@@ -93,6 +95,15 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
               <span>View Demo Dataset</span>
             </button>
           </div>
+          {onOpenMobileStudio && (
+            <button
+              type="button"
+              onClick={onOpenMobileStudio}
+              className="mt-3 w-full px-4 py-2 text-xs font-semibold text-teal-700 hover:text-teal-900 underline cursor-pointer"
+            >
+              Return to Califnco Mobile App Studio (Screens 23–24)
+            </button>
+          )}
         </div>
       </div>
     );
@@ -101,10 +112,19 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
   // Unauthenticated Administrator Sign-In View
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-between p-6">
-      <div className="max-w-6xl w-full mx-auto pt-2">
+      <div className="max-w-6xl w-full mx-auto pt-2 flex items-center justify-between gap-4">
         <span className="font-display text-base font-bold tracking-tight text-slate-900">
           Califnco Admin
         </span>
+        {onOpenMobileStudio && (
+          <button
+            type="button"
+            onClick={onOpenMobileStudio}
+            className="text-xs font-semibold text-teal-700 hover:text-teal-900 underline cursor-pointer whitespace-nowrap"
+          >
+            Open Mobile App Studio
+          </button>
+        )}
       </div>
 
       <main className="w-full max-w-md mx-auto bg-white border border-slate-200 rounded-xl p-8">
@@ -157,7 +177,7 @@ export const AdminAuthGate: React.FC<AdminAuthGateProps> = ({
 
       <footer className="max-w-6xl w-full mx-auto pb-2 text-xs text-slate-500 flex flex-wrap items-center justify-between gap-2">
         <span>Califnco Water Purifiers · Enterprise Operations</span>
-        <span>Pages 19 & 20 · Admin Dashboard & Order Management</span>
+        <span>Pages 19–22 · Admin Operations Console</span>
       </footer>
     </div>
   );

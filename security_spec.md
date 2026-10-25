@@ -1,4 +1,4 @@
-# Califnco Admin Web Application — Zero-Trust Firestore Security Specification
+# Califnco Mobile & Admin Platform — Zero-Trust Firestore Security Specification
 
 ## 1. Data Invariants & Relationship Mapping (Master Source of Truth)
 
@@ -8,45 +8,49 @@
    - Users cannot self-create or self-elevate records in `/admins/{adminId}`.
 
 2. **PII Split-Collection Isolation Invariant**:
-   - `/orders/{orderId}` contains operational summary metadata only (`orderNumber`, `channel`, `partyId`, `partyDisplayName`, `regionCity`, monetary totals, and statuses). Zero street addresses, phone numbers, personal emails, or tax IDs are stored on summary documents.
-   - Sensitive recipient PII (`recipientName`, `email`, `phone`, `shippingAddress`, `postalCode`, `gstin`) is isolated inside `/orders/{orderId}/private_details/shipping`.
-   - Bulk `list` queries on `/orders/{orderId}/private_details` and `/admins` are unconditionally denied (`allow list: if false;`) to prevent bulk PII or admin directory scraping.
+   - `/orders/{orderId}`, `/dealers/{dealerId}`, and `/service_requests/{requestId}` store operational and compliance summary metadata only. Street addresses, personal/direct phone numbers, and contact emails are isolated inside dedicated single-document subcollections:
+     - `/orders/{orderId}/private_details/shipping`
+     - `/dealers/{dealerId}/application_details/review`
+     - `/service_requests/{requestId}/private_details/contact`
+   - Bulk `list` queries on `/admins`, `/service_schedules`, and all PII subcollections (`private_details`, `application_details`) are unconditionally denied (`allow list: if false;`).
 
-3. **Master Gate & Atomic Creation Invariant**:
-   - Creating `/orders/{orderId}` requires `existsAfter(/databases/$(database)/documents/orders/$(orderId)/private_details/shipping)` in the same atomic batch.
-   - Subcollections `/orders/{orderId}/items/{itemId}` and `/orders/{orderId}/private_details/{detailId}` verify parent existence and ownership parity (`getAfter` / `get` on `/orders/$(orderId)`) so orphaned line items or mismatched `customerUid` records can never exist.
+3. **Dealer Anti-Self-Approval & Mobile Approval Gate Invariant (Page 21)**:
+   - Non-administrator applicants creating `/dealers/{dealerId}` MUST bind `dealerId == request.auth.uid`, `ownerUid == request.auth.uid`, `approvalStatus == 'pending'`, `rejectionReason == ''`, `creditLimit == 0`, `availableCredit == 0`, and atomically create `/dealers/{dealerId}/application_details/review`. Self-approval (`approvalStatus == 'approved'`) on registration is strictly rejected.
+   - Non-administrators have zero `update` privileges on `/dealers/{dealerId}` — applicants can never approve themselves or alter credit limits.
+   - Only `isAdmin()` can transition a `'pending'` dealer application to `'approved'` (setting `reviewedByUid == request.auth.uid`, `reviewedAt == request.time`, `updatedAt == request.time`, `rejectionReason == ''`, and positive `creditLimit`) or `'rejected'` (requiring `rejectionReason.size() >= 5`, `creditLimit == 0`, `reviewedByUid == request.auth.uid`, `reviewedAt == request.time`, and `updatedAt == request.time`).
+   - Mobile Wholesale Gate: Creating a wholesale order (`channel == 'dealer'`) in `/orders/{orderId}` by a non-admin requires `get(/databases/$(database)/documents/dealers/$(request.auth.uid)).data.approvalStatus == 'approved'`.
 
-4. **Deterministic Order Lifecycle & Terminal State Locking**:
-   - Allowed fulfilment forward steps:
-     - `pending` -> `confirmed`
-     - `confirmed` -> `processing`
-     - `processing` -> `dispatched`
-     - `dispatched` -> `delivered`
-   - Pre-dispatch cancellation:
-     - Allowed only from `pending`, `confirmed`, or `processing` -> `cancelled` (if `paymentStatus == 'paid'`, `paymentStatus` must simultaneously transition to `'refunded'`).
-   - Terminal states:
-     - Once `fulfilmentStatus` reaches `'delivered'` or `'cancelled'`, all subsequent updates to `/orders/{orderId}` are rejected.
-   - Temporal & Identity Immutability:
-     - `createdAt == request.time` on creation, `updatedAt == request.time` on update, and `createdByUid`, `customerUid`, `orderNumber`, `totalAmount`, and `createdAt` are immutable across updates.
+4. **Service Desk Lifecycle & Resolution Notes Invariant (Page 22)**:
+   - Supports water purifier `Installation`, `Maintenance`, and `Repair` service requests.
+   - Only `isAdmin()` can update `/service_requests/{requestId}` status (`open` -> `scheduled` / `in_progress` / `cancelled`; `scheduled` -> `in_progress` / `completed` / `cancelled`; `in_progress` -> `completed` / `cancelled`), `scheduledDateIso`, and `resolutionNotes`.
+   - Terminal states `'completed'` and `'cancelled'` lock further mutations and require documented `resolutionNotes` (`size() >= 5 && size() <= 600`) plus `updatedByUid == request.auth.uid` and `updatedAt == request.time`.
+
+5. **Mobile Service Booking & Scheduling Integrity Invariant (Screens 23 & 24)**:
+   - Verified customers creating `/service_requests/{requestId}` MUST set `customerUid == request.auth.uid`, `createdByUid == request.auth.uid`, `status == 'open'`, `resolutionNotes == ''`, `createdAt == request.time`, `updatedAt == request.time`, and atomically create `/service_requests/{requestId}/private_details/contact` (`existsAfter(...)`).
+   - Customers CANNOT self-confirm appointments (`status: 'scheduled'`) on creation; submitted requests always enter `'open'` until dispatch confirms availability.
+   - Standalone service requests (`orderId == 'DIRECT-SERVICE'`) are allowed without requiring an online order record; if a specific `orderId` is referenced, `existsAfter` and `customerUid == request.auth.uid` prevent cross-customer order linking.
+   - `/service_schedules/{scheduleId}` permits verified single-document `get` lookups (`allow list: if false`) to supply real configured time slots on Screen 23 while restricting all writes to `isAdmin()`.
 
 ---
 
-## 2. The "Dirty Dozen" Adversarial Payloads
+## 2. The "Dirty Dozen" (+ Mobile Service Booking) Adversarial Payloads
 
 | # | Attack Vector | Target Path & Op | Malicious Payload Summary | Expected Result |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | **Self-Assigned Admin Escalation** | `CREATE /admins/attacker_uid` | Non-admin user writes `{ uid: "attacker_uid", email: "evil@corp.com", displayName: "Attacker", grantedByUid: "attacker_uid", createdAt: SERVER_TIME }` | `PERMISSION_DENIED` |
+| 1 | **Self-Assigned Admin Escalation** | `CREATE /admins/attacker_uid` | Non-admin user writes `{ uid: "attacker_uid", ... }` | `PERMISSION_DENIED` |
 | 2 | **Unverified Email Admin Spoof** | `GET /orders/ord_1001` | Token has `email: "carternoah060@gmail.com"` with `email_verified: false` | `PERMISSION_DENIED` |
 | 3 | **Shadow / Ghost Field Injection** | `UPDATE /orders/ord_1001` | Admin sends valid `confirmed` transition plus `{ isVerifiedOverride: true }` | `PERMISSION_DENIED` |
-| 4 | **State Shortcutting (Skip Steps)** | `UPDATE /orders/ord_1001` | Admin attempts jump from `fulfilmentStatus: "pending"` directly to `"delivered"` | `PERMISSION_DENIED` |
-| 5 | **Terminal State Mutation** | `UPDATE /orders/ord_delivered` | Admin attempts to revert a `"delivered"` order back to `"processing"` | `PERMISSION_DENIED` |
-| 6 | **Dispatched Order Illegal Cancel** | `UPDATE /orders/ord_dispatched` | Admin attempts to set `fulfilmentStatus: "cancelled"` after freight dispatch | `PERMISSION_DENIED` |
-| 7 | **Cross-Tenant PII Theft** | `GET /orders/ord_1001/private_details/shipping` | Authenticated non-owner customer attempts `get` on another customer's shipping address | `PERMISSION_DENIED` |
-| 8 | **Bulk PII List Scraping** | `LIST /orders/ord_1001/private_details` | Any client attempts collection `list` on `private_details` | `PERMISSION_DENIED` |
-| 9 | **Denial-of-Wallet Oversized ID / String** | `CREATE /orders/AAAA...[200 chars]` | Payload injects 200-char doc ID or 5,000-char `partyDisplayName` | `PERMISSION_DENIED` |
-| 10 | **Value Poisoning on Allowed Key** | `UPDATE /orders/ord_1001` | Updates whitelisted key `fulfilmentStatus` to integer `999` or `"hacked_state"` | `PERMISSION_DENIED` |
-| 11 | **Orphaned Order Summary (Missing Atomic PII)** | `CREATE /orders/ord_orphan` | Creates `/orders/ord_orphan` alone without `/orders/ord_orphan/private_details/shipping` | `PERMISSION_DENIED` |
-| 12 | **Forged Client Timestamp / Immutable Tamper** | `UPDATE /orders/ord_1001` | Admin modifies `totalAmount: 1` or supplies past `updatedAt` != `request.time` | `PERMISSION_DENIED` |
+| 4 | **Order State Shortcutting** | `UPDATE /orders/ord_1001` | Admin attempts jump from `fulfilmentStatus: "pending"` directly to `"delivered"` | `PERMISSION_DENIED` |
+| 5 | **Terminal Order Mutation** | `UPDATE /orders/ord_delivered` | Admin attempts to revert a `"delivered"` order back to `"processing"` | `PERMISSION_DENIED` |
+| 6 | **Dealer Self-Approval on Create** | `CREATE /dealers/dealer_attacker` | Applicant submits new dealer profile with `approvalStatus: "approved"` or `creditLimit: 500000` | `PERMISSION_DENIED` |
+| 7 | **Dealer Self-Approval on Update** | `UPDATE /dealers/dealer_pending` | Pending dealer owner attempts `update` setting `approvalStatus: "approved"` | `PERMISSION_DENIED` |
+| 8 | **Admin Rejection Without Reason** | `UPDATE /dealers/dealer_pending` | Admin rejects dealer with empty `rejectionReason: ""` or forged `reviewedAt` | `PERMISSION_DENIED` |
+| 9 | **Unapproved Dealer Wholesale Order** | `CREATE /orders/po_unapproved` | Pending/rejected dealer attempts to create `channel: "dealer"` wholesale order | `PERMISSION_DENIED` |
+| 10 | **Cross-Tenant PII Theft & List Scrape** | `GET/LIST .../private_details` & `application_details` | Non-owner user attempts `get` or any user attempts `list` on isolated PII subcollections | `PERMISSION_DENIED` |
+| 11 | **Service Ticket Close Without Notes** | `UPDATE /service_requests/srv_401` | Admin marks ticket `completed` with empty `resolutionNotes: ""` or skips `open -> completed` | `PERMISSION_DENIED` |
+| 12 | **Terminal Service Ticket Mutation** | `UPDATE /service_requests/srv_done` | Admin attempts to reopen or alter a `completed` or `cancelled` service request | `PERMISSION_DENIED` |
+| 13 | **Customer Spoofed Confirmed Appointment** | `CREATE /service_requests/srv_spoof` | Customer submits Screen 23 booking with `status: "scheduled"` or `customerUid` of another user | `PERMISSION_DENIED` |
+| 14 | **Unauthorized Schedule Slot Injection** | `CREATE /service_schedules/2026-10-29_400050` | Non-admin user attempts to publish or overwrite technician scheduling slots | `PERMISSION_DENIED` |
 
 ---
 
@@ -54,9 +58,12 @@
 
 | Collection | Identity Spoofing | State Shortcutting | Resource / Value Poisoning | Query / PII Leak Check | Audit Verdict |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `/admins/{adminId}` | Blocked: `isAdmin()` required to grant; `uid == adminId` & `grantedByUid == request.auth.uid` enforced. | Immutable (`allow update: if false`). | `isValidId(adminId)` + strict `hasOnly` + string `.size()` bounds. | `allow list: if false`; `get` restricted to `isAdmin()` or self UID. | **PASS** |
-| `/orders/{orderId}` | `createdByUid == request.auth.uid`; immutable `customerUid`, `orderNumber`, `createdAt`. | Strict step-by-step state machine + terminal lock on `delivered` / `cancelled`. | `isValidOrder(incoming())` wraps `create` and `update`; numeric & string bounds enforced. | Zero PII stored; `list` requires `isBootstrappedAdmin()` or `resource.data.customerUid == request.auth.uid` (0 `get()`/`exists()` calls). | **PASS** |
-| `/orders/{orderId}/items/{itemId}` | `getAfter` Master Gate verifies parent order exists and `customerUid` matches parent. | Immutable line items (`allow update, delete: if false`). | `isValidOrderLineItem(incoming())` enforces SKU regex, category enum, and positive bounds. | `list` checks `isBootstrappedAdmin()` or `resource.data.customerUid == request.auth.uid` (0 DB lookups). | **PASS** |
-| `/orders/{orderId}/private_details/{detailId}` | Locked to `detailId == 'shipping'`; Master Gate checks parent order ownership/admin. | Updates restricted to `dispatchNotes` + `updatedAt` by `isAdmin()` before terminal parent state. | `isValidOrderPrivateDetails(incoming())` enforces address, email, phone, postal regex/bounds. | `allow list: if false`; `get` restricted strictly to `isAdmin()` or parent order `customerUid`. | **PASS** |
-| `/dealers/{dealerId}` | `createdByUid == request.auth.uid`; `ownerUid` immutable. | Action-based update allows only `approvalStatus`, `wholesaleTier`, `updatedAt` by `isAdmin()`. | `isValidDealerSummary(incoming())` wraps all writes with regex & size bounds. | `list` restricted to `isBootstrappedAdmin()` or `resource.data.ownerUid == request.auth.uid`. | **PASS** |
-| `/service_requests/{requestId}` | `createdByUid == request.auth.uid`; Master Gate checks `exists(/orders/$(incoming().orderId))`. | Terminal lock on `completed` / `cancelled`; `affectedKeys().hasOnly(['status', 'scheduledDateIso', 'updatedAt'])`. | `isValidServiceRequest(incoming())` wraps `create` and `update`. | `list` restricted to `isBootstrappedAdmin()` or `resource.data.customerUid == request.auth.uid`. | **PASS** |
+| `/admins/{adminId}` | Blocked: `isAdmin()` required; `uid == adminId` & `grantedByUid == request.auth.uid`. | Immutable (`allow update: if false`). | `isValidId` + strict `hasOnly` + `.size()` bounds. | `allow list: if false`; `get` restricted to `isAdmin()` or self UID. | **PASS** |
+| `/orders/{orderId}` | `createdByUid == request.auth.uid`; wholesale orders verify `dealers/$(uid).approvalStatus == 'approved'`. | Step-by-step fulfilment + terminal lock on `delivered` / `cancelled`. | `isValidOrderSummary(incoming())` wraps `create` and `update`. | Zero PII; `list` uses 0 DB reads. | **PASS** |
+| `/orders/{orderId}/items/{itemId}` | `getAfter` Master Gate verifies parent order & `customerUid`. | Immutable (`allow update, delete: if false`). | `isValidOrderLineItem(incoming())` enforces bounds. | `list` checks `isBootstrappedAdmin()` or `resource.data.customerUid == request.auth.uid`. | **PASS** |
+| `/orders/{orderId}/private_details/{detailId}` | Locked to `detailId == 'shipping'`; Master Gate checks parent order. | Updates restricted to `dispatchNotes` + `updatedAt` by `isAdmin()`. | `isValidOrderPrivateDetails(incoming())` wraps writes. | `allow list: if false`; `get` restricted to `isAdmin()` or parent owner. | **PASS** |
+| `/dealers/{dealerId}` | Non-admin forced to `dealerId == uid`, `ownerUid == uid`, `approvalStatus == 'pending'`; zero non-admin updates. | `pending` -> `approved` or `rejected` (requires reason >= 5 chars); decided states locked; server `reviewedAt` enforced. | `isValidDealerSummary(incoming())` wraps `create` and `update` with strict key & size bounds. | Contact PII split into `application_details/review`; `list` uses 0 DB reads. | **PASS** |
+| `/dealers/{dealerId}/application_details/{detailId}` | Locked to `detailId == 'review'`; Master Gate verifies parent dealer `ownerUid` or `isAdmin()`. | Read-only after submission (`allow update: if false`). | `isValidDealerApplicationReviewDetails(incoming())` enforces email/phone/warehouse bounds. | `allow list: if false`; `get` restricted strictly to `isAdmin()` or parent `ownerUid`. | **PASS** |
+| `/service_requests/{requestId}` | Customer `create` enforces `customerUid == uid`, `createdByUid == uid`, `status == 'open'`, and atomic `private_details/contact`. | Validated lifecycle (`open` -> `scheduled`/`in_progress` -> `completed`), terminal lock, non-empty `resolutionNotes` on close. | `isValidServiceRequest(incoming())` wraps `create` and `update` with `.size()` limits on all fields. | Site contact PII split into `private_details/contact`; `list` uses 0 DB reads. | **PASS** |
+| `/service_requests/{requestId}/private_details/{detailId}` | Locked to `detailId == 'contact'`; Master Gate verifies parent `customerUid` or `isAdmin()`. | Immutable contact snapshot (`allow update, delete: if false`). | `isValidServiceRequestPrivateContact(incoming())` enforces address/phone/TDS bounds. | `allow list: if false`; `get` restricted to `isAdmin()` or parent `customerUid`. | **PASS** |
+| `/service_schedules/{scheduleId}` | Writes restricted strictly to `isAdmin()` with `updatedByUid == request.auth.uid`. | `updatedAt == request.time` enforced on create/update. | `isValidServiceScheduleConfig(incoming())` enforces `availableSlots.size() <= 8` & string length bounds. | `allow list: if false`; single-doc `get` contains zero user PII. | **PASS** |

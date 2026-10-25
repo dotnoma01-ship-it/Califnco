@@ -306,12 +306,19 @@
     },
     "DealerSummary": {
       "title": "DealerSummary",
-      "description": "Wholesale dealer partner status record used for dashboard approval counts.",
+      "description": "Wholesale dealer application and approval record shared between the Admin Web Console and Flutter Dealer Mobile App without personal contact PII.",
       "type": "object",
       "properties": {
         "dealerCode": {
           "type": "string",
           "description": "Unique Califnco dealer partner code.",
+          "minLength": 4,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "dealerId": {
+          "type": "string",
+          "description": "Mirrored dealer partner code read by the Flutter mobile DealerProfileModel.",
           "minLength": 4,
           "maxLength": 32,
           "pattern": "^[A-Z0-9\\-]+$"
@@ -329,15 +336,46 @@
           "minLength": 2,
           "maxLength": 140
         },
+        "contactPerson": {
+          "type": "string",
+          "description": "Authorized trade applicant representative permitted for administrative review.",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "gstin": {
+          "type": "string",
+          "description": "Registered commercial GSTIN tax number permitted for B2B compliance verification.",
+          "minLength": 15,
+          "maxLength": 20,
+          "pattern": "^[0-9A-Z]+$"
+        },
+        "businessType": {
+          "type": "string",
+          "description": "Wholesale channel classification.",
+          "enum": [
+            "Distributor",
+            "Retail Franchise",
+            "Commercial Integrator",
+            "Service Franchise"
+          ],
+          "maxLength": 40
+        },
         "regionCity": {
           "type": "string",
           "description": "Operating city and state.",
           "minLength": 2,
           "maxLength": 80
         },
+        "applicationDateIso": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 timestamp when the dealer application was submitted.",
+          "minLength": 10,
+          "maxLength": 40
+        },
         "approvalStatus": {
           "type": "string",
-          "description": "Dealer onboarding verification state.",
+          "description": "Dealer onboarding verification state respected by both Admin Web and Mobile App.",
           "enum": ["approved", "pending", "rejected"],
           "maxLength": 16
         },
@@ -346,6 +384,32 @@
           "description": "Assigned wholesale margin tier.",
           "minLength": 2,
           "maxLength": 80
+        },
+        "creditLimit": {
+          "type": "number",
+          "description": "Approved Net-30 B2B credit limit in INR."
+        },
+        "availableCredit": {
+          "type": "number",
+          "description": "Remaining Net-30 B2B credit balance in INR."
+        },
+        "rejectionReason": {
+          "type": "string",
+          "description": "Administrative rejection rationale when approvalStatus is rejected.",
+          "minLength": 0,
+          "maxLength": 400
+        },
+        "reviewedByUid": {
+          "type": "string",
+          "description": "Firebase UID of the administrator who recorded the approval decision.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "reviewedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the approval or rejection decision was recorded."
         },
         "createdByUid": {
           "type": "string",
@@ -377,9 +441,72 @@
         "updatedAt"
       ]
     },
+    "DealerApplicationReviewDetails": {
+      "title": "DealerApplicationReviewDetails",
+      "description": "Isolated subcollection storing applicant contact and warehouse details permitted solely for verified administrative review or the applicant owner.",
+      "type": "object",
+      "properties": {
+        "dealerDocId": {
+          "type": "string",
+          "description": "Parent dealer document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "applicantEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Business trade email for onboarding correspondence.",
+          "minLength": 5,
+          "maxLength": 160
+        },
+        "applicantPhone": {
+          "type": "string",
+          "description": "Applicant direct business telephone.",
+          "minLength": 7,
+          "maxLength": 24
+        },
+        "registeredWarehouse": {
+          "type": "string",
+          "description": "Registered commercial warehouse address for wholesale freight delivery.",
+          "minLength": 5,
+          "maxLength": 320
+        },
+        "annualProjectedVolumeInr": {
+          "type": "number",
+          "description": "Applicant estimated annual wholesale procurement volume in INR."
+        },
+        "applicantNotes": {
+          "type": "string",
+          "description": "Trade background and distribution territory summary submitted for review.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "dealerDocId",
+        "applicantEmail",
+        "applicantPhone",
+        "registeredWarehouse",
+        "annualProjectedVolumeInr",
+        "applicantNotes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "ServiceRequest": {
       "title": "ServiceRequest",
-      "description": "Installation and RO maintenance dispatch ticket summary.",
+      "description": "Water purifier installation, preventive maintenance, and repair service desk ticket.",
       "type": "object",
       "properties": {
         "ticketNumber": {
@@ -405,17 +532,38 @@
         },
         "customerUid": {
           "type": "string",
-          "description": "Firebase UID of the customer.",
+          "description": "Firebase UID of the customer or dealer.",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
+        "customerCode": {
+          "type": "string",
+          "description": "Customer or dealer operational identifier.",
+          "minLength": 3,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "customerDisplayName": {
+          "type": "string",
+          "description": "Customer or account display name without street address or phone PII.",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "requestCategory": {
+          "type": "string",
+          "description": "High-level water purifier service classification.",
+          "enum": ["Installation", "Maintenance", "Repair"],
+          "maxLength": 24
+        },
         "serviceType": {
           "type": "string",
-          "description": "Category of technician visit.",
+          "description": "Specific water purifier technician visit type.",
           "enum": [
             "RO Installation",
+            "Preventive Maintenance",
             "6-Month Filter Check",
+            "Purifier Repair",
             "Booster Pump Calibration",
             "Warranty Repair"
           ],
@@ -423,8 +571,8 @@
         },
         "status": {
           "type": "string",
-          "description": "Ticket lifecycle state.",
-          "enum": ["open", "scheduled", "completed", "cancelled"],
+          "description": "Service desk ticket lifecycle state.",
+          "enum": ["open", "scheduled", "in_progress", "completed", "cancelled"],
           "maxLength": 20
         },
         "regionCity": {
@@ -433,11 +581,56 @@
           "minLength": 2,
           "maxLength": 80
         },
-        "scheduledDateIso": {
+        "submissionDateIso": {
           "type": "string",
-          "description": "Scheduled service date ISO string.",
+          "format": "date-time",
+          "description": "ISO-8601 timestamp when the service request was submitted.",
           "minLength": 10,
           "maxLength": 40
+        },
+        "scheduledDateIso": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Preferred or scheduled service visit date ISO string.",
+          "minLength": 10,
+          "maxLength": 40
+        },
+        "preferredTimeSlot": {
+          "type": "string",
+          "description": "Optional preferred time slot window when supplied by a configured scheduling system.",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "productId": {
+          "type": "string",
+          "description": "Optional Califnco product SKU identifier when a specific product is applicable.",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "productModel": {
+          "type": "string",
+          "description": "Califnco water purifier, dispenser, or pump unit model.",
+          "minLength": 2,
+          "maxLength": 160
+        },
+        "requestDetails": {
+          "type": "string",
+          "description": "Customer reported issue, water quality observation, or installation site specification.",
+          "minLength": 5,
+          "maxLength": 600
+        },
+        "resolutionNotes": {
+          "type": "string",
+          "description": "Technician diagnostic and administrative resolution notes.",
+          "minLength": 0,
+          "maxLength": 600
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "UID of the administrator who last updated the service request.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "createdByUid": {
           "type": "string",
@@ -470,6 +663,118 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "ServiceRequestPrivateContact": {
+      "title": "ServiceRequestPrivateContact",
+      "description": "Isolated customer service address and phone subcollection protected from list queries.",
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "description": "Parent service request document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "contactName": {
+          "type": "string",
+          "description": "On-site contact person.",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "description": "On-site contact phone number.",
+          "minLength": 7,
+          "maxLength": 24
+        },
+        "serviceAddress": {
+          "type": "string",
+          "description": "Street address for technician dispatch.",
+          "minLength": 5,
+          "maxLength": 320
+        },
+        "waterSourceTdsPpm": {
+          "type": "number",
+          "description": "Measured or reported input water TDS in ppm."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "requestId",
+        "contactName",
+        "phone",
+        "serviceAddress",
+        "waterSourceTdsPpm",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ServiceScheduleConfig": {
+      "title": "ServiceScheduleConfig",
+      "description": "Configured technician scheduling availability slots per date and service postal code.",
+      "type": "object",
+      "properties": {
+        "scheduleId": {
+          "type": "string",
+          "description": "Deterministic schedule document identifier (YYYY-MM-DD_POSTAL).",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "dateIso": {
+          "type": "string",
+          "description": "Target service calendar date in YYYY-MM-DD format.",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "postalCode": {
+          "type": "string",
+          "description": "Service area PIN or postal code.",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[0-9A-Za-z\\- ]+$"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether live time-slot supply is enabled for this date and postal code."
+        },
+        "availableSlots": {
+          "type": "array",
+          "description": "Up to 8 configured technician arrival windows supplied by dispatch."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "Administrator UID who configured the schedule slots.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when slots were published."
+        }
+      },
+      "required": [
+        "scheduleId",
+        "dateIso",
+        "postalCode",
+        "isActive",
+        "availableSlots",
+        "updatedByUid",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -491,11 +796,23 @@
     },
     "/dealers/{dealerId}": {
       "schema": "DealerSummary",
-      "description": "Dealer onboarding and approval status directory."
+      "description": "Dealer onboarding application and approval status directory shared with Flutter mobile app."
+    },
+    "/dealers/{dealerId}/application_details/{detailId}": {
+      "schema": "DealerApplicationReviewDetails",
+      "description": "Strictly isolated dealer applicant contact and warehouse review details."
     },
     "/service_requests/{requestId}": {
       "schema": "ServiceRequest",
-      "description": "Technician installation and RO maintenance service tickets."
+      "description": "Water purifier installation, maintenance, and repair service desk tickets."
+    },
+    "/service_requests/{requestId}/private_details/{detailId}": {
+      "schema": "ServiceRequestPrivateContact",
+      "description": "Strictly isolated customer service site address and phone PII."
+    },
+    "/service_schedules/{scheduleId}": {
+      "schema": "ServiceScheduleConfig",
+      "description": "Configured technician time-slot availability queried by Mobile Screen 23."
     }
   }
 }

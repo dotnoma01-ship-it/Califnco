@@ -4,15 +4,20 @@ import { AdminAuthGate } from './admin/components/AdminAuthGate';
 import { AdminLayout } from './admin/components/AdminLayout';
 import { DEMO_DEALERS, DEMO_ORDERS, DEMO_SERVICE_REQUESTS } from './admin/demoData';
 import { auth, googleProvider, isFirebaseConfigured } from './admin/firebase';
+import MobileAppStudio from './MobileAppStudio';
 import { AdminDashboardPage } from './admin/pages/AdminDashboardPage';
+import { DealerApprovalPage } from './admin/pages/DealerApprovalPage';
 import { OrderManagementPage } from './admin/pages/OrderManagementPage';
+import { ServiceDeskPage } from './admin/pages/ServiceDeskPage';
 import {
   seedInitialFirestoreData,
   subscribeAdminWorkspace,
+  syncMissingDealerAndServiceSamples,
   verifyAdminAccess,
 } from './admin/services/adminFirestoreService';
 import type {
   AdminPageId,
+  DealerApprovalStatus,
   DealerSummary,
   FulfilmentStatus,
   OrderSummary,
@@ -59,8 +64,10 @@ class AdminErrorBoundary extends Component<{ children: React.ReactNode }, ErrorB
 }
 
 export default function App() {
+  const [workspaceView, setWorkspaceView] = useState<'mobile' | 'admin'>('mobile');
   const [activePage, setActivePage] = useState<AdminPageId>('dashboard');
   const [statusFilter, setStatusFilter] = useState<FulfilmentStatus | 'all'>('all');
+  const [dealerFilter, setDealerFilter] = useState<DealerApprovalStatus | 'all'>('pending');
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
   // Auth & RBAC State
@@ -184,9 +191,44 @@ export default function App() {
     setIsSeeding(true);
     try {
       await seedInitialFirestoreData(user.uid);
-      showNotice('Seeded sample Califnco orders, dealers, and service tickets to Cloud Firestore.');
+      showNotice(
+        'Seeded sample Califnco orders, dealer applications, and service requests to Cloud Firestore.'
+      );
     } catch (err) {
       showNotice(err instanceof Error ? err.message : 'Failed to seed Cloud Firestore.');
+    } finally {
+      setIsSeeding(false);
+    }
+  };
+
+  const canSyncExtendedSamples = useMemo(() => {
+    if (isDemoMode || dataLoading || Boolean(dataError) || liveOrders.length === 0) {
+      return false;
+    }
+    const existingDealers = new Set(liveDealers.map((d) => d.id));
+    const existingServices = new Set(liveServiceRequests.map((s) => s.id));
+    const missingDealer = DEMO_DEALERS.some((d) => !existingDealers.has(d.id));
+    const missingService = DEMO_SERVICE_REQUESTS.some((s) => !existingServices.has(s.id));
+    return missingDealer || missingService;
+  }, [isDemoMode, dataLoading, dataError, liveOrders.length, liveDealers, liveServiceRequests]);
+
+  const handleSyncMissingSamples = async () => {
+    if (!user || !isAuthorizedAdmin) return;
+    setIsSeeding(true);
+    try {
+      const added = await syncMissingDealerAndServiceSamples({
+        adminUid: user.uid,
+        existingOrderIds: new Set(liveOrders.map((o) => o.id)),
+        existingDealerIds: new Set(liveDealers.map((d) => d.id)),
+        existingServiceIds: new Set(liveServiceRequests.map((s) => s.id)),
+      });
+      showNotice(
+        added > 0
+          ? `Synced ${added} additional sample records to Cloud Firestore.`
+          : 'All sample dealer and service records are already present.'
+      );
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : 'Failed to sync sample records.');
     } finally {
       setIsSeeding(false);
     }
@@ -201,12 +243,29 @@ export default function App() {
     [orders]
   );
 
+  const pendingDealersCount = useMemo(
+    () => dealers.filter((d) => d.approvalStatus === 'pending').length,
+    [dealers]
+  );
+
+  const openServiceCount = useMemo(
+    () => serviceRequests.filter((s) => s.status === 'open').length,
+    [serviceRequests]
+  );
+
   // Show Auth Gate unless user is an authorized admin OR explicitly chose Demo Preview
   const showWorkspace = (Boolean(user) && isAuthorizedAdmin) || isDemoMode;
 
   return (
     <AdminErrorBoundary>
-      {!showWorkspace ? (
+      {workspaceView === 'mobile' ? (
+        <MobileAppStudio
+          onOpenAdminConsole={() => {
+            setActivePage('service');
+            setWorkspaceView('admin');
+          }}
+        />
+      ) : !showWorkspace ? (
         <AdminAuthGate
           user={user}
           authLoading={authLoading}
@@ -218,26 +277,30 @@ export default function App() {
             setIsDemoMode(true);
             showNotice('Entered Read-Only Demo Mode.');
           }}
+          onOpenMobileStudio={() => setWorkspaceView('mobile')}
         />
       ) : (
         <AdminLayout
           activePage={activePage}
           onNavigate={(page) => {
             setActivePage(page);
-            if (page === 'dashboard') {
+            if (page !== 'orders') {
               setSelectedOrderId(null);
             }
           }}
           user={user}
           isDemoMode={isDemoMode}
           pendingOrdersCount={pendingOrdersCount}
+          pendingDealersCount={pendingDealersCount}
+          openServiceCount={openServiceCount}
           canSeedFirestore={!isDemoMode && !dataLoading && !dataError && liveOrders.length === 0}
           isSeeding={isSeeding}
           onSeedFirestore={handleSeedFirestore}
           onGoogleSignIn={handleGoogleSignIn}
           onSignOut={handleSignOut}
+          onOpenMobileStudio={() => setWorkspaceView('mobile')}
         >
-          {activePage === 'dashboard' ? (
+          {activePage === 'dashboard' && (
             <AdminDashboardPage
               orders={orders}
               dealers={dealers}
@@ -256,8 +319,17 @@ export default function App() {
                 setStatusFilter(status);
                 setActivePage('orders');
               }}
+              onOpenDealerApprovals={() => {
+                setDealerFilter('pending');
+                setActivePage('dealers');
+              }}
+              onOpenServiceDesk={() => {
+                setActivePage('service');
+              }}
             />
-          ) : (
+          )}
+
+          {activePage === 'orders' && (
             <OrderManagementPage
               orders={orders}
               loading={!isDemoMode && dataLoading}
@@ -271,6 +343,46 @@ export default function App() {
               onSeedFirestore={handleSeedFirestore}
               onRetry={() => setRetryCounter((c) => c + 1)}
               onGoogleSignIn={handleGoogleSignIn}
+              onNotify={showNotice}
+            />
+          )}
+
+          {activePage === 'dealers' && (
+            <DealerApprovalPage
+              dealers={dealers}
+              currentAdminUid={user?.uid ?? null}
+              loading={!isDemoMode && dataLoading}
+              error={isDemoMode ? null : dataError}
+              isDemoMode={isDemoMode}
+              isSeeding={isSeeding}
+              canSyncSamples={canSyncExtendedSamples}
+              initialFilter={dealerFilter}
+              onFilterChange={setDealerFilter}
+              onSeedFirestore={handleSeedFirestore}
+              onSyncSamples={handleSyncMissingSamples}
+              onRetry={() => setRetryCounter((c) => c + 1)}
+              onGoogleSignIn={handleGoogleSignIn}
+              onNotify={showNotice}
+            />
+          )}
+
+          {activePage === 'service' && (
+            <ServiceDeskPage
+              serviceRequests={serviceRequests}
+              currentAdminUid={user?.uid ?? null}
+              loading={!isDemoMode && dataLoading}
+              error={isDemoMode ? null : dataError}
+              isDemoMode={isDemoMode}
+              isSeeding={isSeeding}
+              canSyncSamples={canSyncExtendedSamples}
+              onSeedFirestore={handleSeedFirestore}
+              onSyncSamples={handleSyncMissingSamples}
+              onRetry={() => setRetryCounter((c) => c + 1)}
+              onGoogleSignIn={handleGoogleSignIn}
+              onInspectLinkedOrder={(orderId) => {
+                setActivePage('orders');
+                setSelectedOrderId(orderId);
+              }}
               onNotify={showNotice}
             />
           )}

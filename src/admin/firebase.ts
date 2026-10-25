@@ -13,17 +13,52 @@ export interface ResolvedFirebaseConfig {
   firestoreDatabaseId?: string;
 }
 
-const resolvedConfig: ResolvedFirebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || appletConfig.apiKey,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || appletConfig.authDomain,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || appletConfig.projectId,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || appletConfig.storageBucket,
-  messagingSenderId:
-    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || appletConfig.messagingSenderId,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || appletConfig.appId,
-  firestoreDatabaseId:
-    import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || appletConfig.firestoreDatabaseId,
-};
+const hasProvisionedAppletConfig = Boolean(
+  appletConfig.apiKey &&
+    appletConfig.projectId &&
+    appletConfig.projectId !== 'remixed-project-id'
+);
+
+const envProjectId = (import.meta.env.VITE_FIREBASE_PROJECT_ID || '').trim();
+const envDatabaseId = (import.meta.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID || '').trim();
+
+/**
+ * Use the provisioned firebase-applet-config.json directly whenever it is configured
+ * for the active project so environment defaults like VITE_FIREBASE_FIRESTORE_DATABASE_ID="(default)"
+ * cannot override the provisioned named Firestore database instance.
+ */
+const useExternalEnvOverride = Boolean(
+  envProjectId && (!hasProvisionedAppletConfig || envProjectId !== appletConfig.projectId)
+);
+
+const resolvedDatabaseId = useExternalEnvOverride
+  ? envDatabaseId && envDatabaseId !== '(default)'
+    ? envDatabaseId
+    : undefined
+  : appletConfig.firestoreDatabaseId ||
+    (envDatabaseId && envDatabaseId !== '(default)' ? envDatabaseId : undefined);
+
+export const resolvedConfig: ResolvedFirebaseConfig = useExternalEnvOverride
+  ? {
+      apiKey: import.meta.env.VITE_FIREBASE_API_KEY || appletConfig.apiKey,
+      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || appletConfig.authDomain,
+      projectId: envProjectId,
+      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || appletConfig.storageBucket,
+      messagingSenderId:
+        import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || appletConfig.messagingSenderId,
+      appId: import.meta.env.VITE_FIREBASE_APP_ID || appletConfig.appId,
+      firestoreDatabaseId: resolvedDatabaseId,
+    }
+  : {
+      apiKey: appletConfig.apiKey || import.meta.env.VITE_FIREBASE_API_KEY,
+      authDomain: appletConfig.authDomain || import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+      projectId: appletConfig.projectId || envProjectId,
+      storageBucket: appletConfig.storageBucket || import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+      messagingSenderId:
+        appletConfig.messagingSenderId || import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+      appId: appletConfig.appId || import.meta.env.VITE_FIREBASE_APP_ID,
+      firestoreDatabaseId: resolvedDatabaseId,
+    };
 
 export const isFirebaseConfigured = Boolean(
   resolvedConfig.apiKey &&
@@ -33,9 +68,10 @@ export const isFirebaseConfigured = Boolean(
 
 const app = initializeApp(resolvedConfig);
 
-export const db = resolvedConfig.firestoreDatabaseId
-  ? getFirestore(app, resolvedConfig.firestoreDatabaseId)
-  : getFirestore(app);
+export const db =
+  resolvedConfig.firestoreDatabaseId && resolvedConfig.firestoreDatabaseId !== '(default)'
+    ? getFirestore(app, resolvedConfig.firestoreDatabaseId)
+    : getFirestore(app);
 
 export const auth = getAuth(app);
 

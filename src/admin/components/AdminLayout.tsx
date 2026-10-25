@@ -3,6 +3,8 @@ import type { User } from 'firebase/auth';
 import {
   LayoutDashboard,
   ClipboardList,
+  Building2,
+  Wrench,
   Menu,
   X,
   LogOut,
@@ -18,13 +20,23 @@ interface AdminLayoutProps {
   user: User | null;
   isDemoMode: boolean;
   pendingOrdersCount: number;
+  pendingDealersCount: number;
+  openServiceCount: number;
   canSeedFirestore: boolean;
   isSeeding: boolean;
   onSeedFirestore: () => void;
   onGoogleSignIn: () => void;
   onSignOut: () => void;
+  onOpenMobileStudio?: () => void;
   children: React.ReactNode;
 }
+
+const PAGE_TITLES: Record<AdminPageId, string> = {
+  dashboard: 'Admin Dashboard',
+  orders: 'Order Management',
+  dealers: 'Dealer Approval',
+  service: 'Service Desk',
+};
 
 export const AdminLayout: React.FC<AdminLayoutProps> = ({
   activePage,
@@ -32,16 +44,19 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   user,
   isDemoMode,
   pendingOrdersCount,
+  pendingDealersCount,
+  openServiceCount,
   canSeedFirestore,
   isSeeding,
   onSeedFirestore,
   onGoogleSignIn,
   onSignOut,
+  onOpenMobileStudio,
   children,
 }) => {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
-  const pageTitle = activePage === 'dashboard' ? 'Admin Dashboard' : 'Order Management';
+  const pageTitle = PAGE_TITLES[activePage];
 
   const handleNavSelect = (page: AdminPageId) => {
     onNavigate(page);
@@ -82,7 +97,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             </button>
           </div>
 
-          {/* Primary Navigation — Strictly Page 19 & Page 20 */}
+          {/* Primary Navigation — Strictly Pages 19, 20, 21 & 22 */}
           <nav className="p-4 space-y-1" aria-label="Primary Pages">
             <button
               type="button"
@@ -119,6 +134,44 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                 {pendingOrdersCount > 0 ? `${pendingOrdersCount} pending` : 'P20'}
               </span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => handleNavSelect('dealers')}
+              aria-current={activePage === 'dealers' ? 'page' : undefined}
+              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                activePage === 'dealers'
+                  ? 'bg-teal-700 text-white'
+                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+              }`}
+            >
+              <span className="flex items-center gap-3">
+                <Building2 className="w-4 h-4 shrink-0" />
+                <span>Dealer Approval</span>
+              </span>
+              <span className="font-mono text-xs tabular-nums">
+                {pendingDealersCount > 0 ? `${pendingDealersCount} review` : 'P21'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleNavSelect('service')}
+              aria-current={activePage === 'service' ? 'page' : undefined}
+              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                activePage === 'service'
+                  ? 'bg-teal-700 text-white'
+                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+              }`}
+            >
+              <span className="flex items-center gap-3">
+                <Wrench className="w-4 h-4 shrink-0" />
+                <span>Service Desk</span>
+              </span>
+              <span className="font-mono text-xs tabular-nums">
+                {openServiceCount > 0 ? `${openServiceCount} open` : 'P22'}
+              </span>
+            </button>
           </nav>
         </div>
 
@@ -149,7 +202,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               <div className="px-1">
                 <p className="text-xs font-semibold text-amber-300">Demo Preview Session</p>
                 <p className="text-xs text-slate-400 mt-0.5 leading-snug">
-                  Read-only sample records. Sign in to manage live Firestore orders.
+                  Read-only sample records. Sign in to persist live Firestore updates.
                 </p>
               </div>
               <button
@@ -162,12 +215,21 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               </button>
             </>
           )}
+          {onOpenMobileStudio && (
+            <button
+              type="button"
+              onClick={onOpenMobileStudio}
+              className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-300 border border-slate-700 hover:bg-slate-800 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+            >
+              <span>Open Mobile App Studio</span>
+            </button>
+          )}
         </div>
       </aside>
 
       {/* Main Content Shell */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Top Bar Contract: 3 Zones separated by gap-8 */}
+        {/* Top Bar Contract: Strictly 3 Zones separated by gap-8 */}
         <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-8 flex items-center justify-between gap-8 shrink-0">
           {/* Zone 1: Breadcrumb Trail */}
           <div className="flex items-center gap-3 min-w-0">
@@ -188,33 +250,41 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             </div>
           </div>
 
-          {/* Zone 2: Concise Single-Line Navigation Links */}
+          {/* Zone 2: Concise Single-Line Navigation Links (4 Links) */}
           <nav
             aria-label="Quick Page Switcher"
             className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600"
           >
-            <button
-              type="button"
-              onClick={() => onNavigate('dashboard')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activePage === 'dashboard'
-                  ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-teal-700 font-semibold'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              Dashboard
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigate('orders')}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activePage === 'orders'
-                  ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-teal-700 font-semibold'
-                  : 'hover:text-slate-900'
-              }`}
-            >
-              Orders
-            </button>
+            {(
+              [
+                { id: 'dashboard', label: 'Dashboard' },
+                { id: 'orders', label: 'Orders' },
+                { id: 'dealers', label: 'Dealers' },
+                { id: 'service', label: 'Service' },
+              ] as const
+            ).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onNavigate(item.id)}
+                className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  activePage === item.id
+                    ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-teal-700 font-semibold'
+                    : 'hover:text-slate-900'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+            {onOpenMobileStudio && (
+              <button
+                type="button"
+                onClick={onOpenMobileStudio}
+                className="py-1 text-teal-700 hover:text-teal-900 font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Mobile App
+              </button>
+            )}
           </nav>
 
           {/* Zone 3: Single Primary Action */}
@@ -240,10 +310,10 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             ) : activePage === 'dashboard' ? (
               <button
                 type="button"
-                onClick={() => onNavigate('orders')}
+                onClick={() => onNavigate('dealers')}
                 className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
-                Manage Orders
+                Review Dealers
               </button>
             ) : (
               <button
@@ -267,7 +337,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
               <span>
                 <strong>Demo Data Mode:</strong> Displaying sample Califnco records for preview.
-                Customer PII is redacted and status updates are disabled until you sign in as an
+                Isolated contact PII is redacted and mutations are disabled until you sign in as an
                 authorized administrator.
               </span>
             </div>

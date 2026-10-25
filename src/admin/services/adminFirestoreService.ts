@@ -18,7 +18,9 @@ import {
   DEMO_ORDER_ITEMS,
   DEMO_ORDERS,
   DEMO_SERVICE_REQUESTS,
+  SEED_DEALER_REVIEW_DETAILS,
   SEED_PRIVATE_SHIPPING_BY_ORDER,
+  SEED_SERVICE_PRIVATE_CONTACTS,
 } from '../demoData';
 import {
   BOOTSTRAPPED_ADMIN_EMAIL,
@@ -28,8 +30,12 @@ import {
 } from '../firebase';
 import {
   canSettleOrderPayment,
+  inferServiceCategory,
   VALIDATION_CONSTRAINTS,
+  validateServiceStatusTransition,
   validateStatusTransition,
+  type DealerApplicationReviewDetails,
+  type DealerBusinessType,
   type DealerSummary,
   type FulfilmentStatus,
   type OrderLineItem,
@@ -37,6 +43,10 @@ import {
   type OrderSummary,
   type PaymentStatus,
   type ServiceRequest,
+  type ServiceRequestCategory,
+  type ServiceRequestPrivateContact,
+  type ServiceRequestType,
+  type ServiceTicketStatus,
 } from '../types';
 
 function assertValidDocId(id: string, label: string): void {
@@ -55,6 +65,30 @@ function timestampToIso(value: unknown): string | undefined {
   }
   return undefined;
 }
+
+const VALID_BUSINESS_TYPES: DealerBusinessType[] = [
+  'Distributor',
+  'Retail Franchise',
+  'Commercial Integrator',
+  'Service Franchise',
+];
+
+const VALID_SERVICE_TYPES: ServiceRequestType[] = [
+  'RO Installation',
+  'Preventive Maintenance',
+  '6-Month Filter Check',
+  'Purifier Repair',
+  'Booster Pump Calibration',
+  'Warranty Repair',
+];
+
+const VALID_SERVICE_STATUSES: ServiceTicketStatus[] = [
+  'open',
+  'scheduled',
+  'in_progress',
+  'completed',
+  'cancelled',
+];
 
 /**
  * Verifies administrator authorization against Firebase Auth email verification
@@ -135,20 +169,42 @@ export function subscribeAdminWorkspace(handlers: LiveAdminSubscriptionHandlers)
     (snapshot) => {
       const records: DealerSummary[] = snapshot.docs.map((docSnap) => {
         const d = docSnap.data();
+        const dealerCode = String(d.dealerCode ?? d.dealerId ?? '');
+        const rawBusinessType = String(d.businessType ?? '');
+        const businessType: DealerBusinessType = VALID_BUSINESS_TYPES.includes(
+          rawBusinessType as DealerBusinessType
+        )
+          ? (rawBusinessType as DealerBusinessType)
+          : 'Distributor';
+
+        const createdIso = timestampToIso(d.createdAt) ?? '';
+
         return {
           id: docSnap.id,
-          dealerCode: String(d.dealerCode ?? ''),
+          dealerCode,
+          dealerId: String(d.dealerId ?? dealerCode),
           ownerUid: String(d.ownerUid ?? ''),
           businessName: String(d.businessName ?? ''),
+          contactPerson: String(d.contactPerson ?? 'Authorized Representative'),
+          gstin: String(d.gstin ?? 'PENDING-VERIFICATION'),
+          businessType,
           regionCity: String(d.regionCity ?? ''),
+          applicationDateIso: String(d.applicationDateIso ?? createdIso),
           approvalStatus:
             d.approvalStatus === 'approved' || d.approvalStatus === 'rejected'
               ? d.approvalStatus
               : 'pending',
           wholesaleTier: String(d.wholesaleTier ?? ''),
+          creditLimit: Number(d.creditLimit ?? 0),
+          availableCredit: Number(d.availableCredit ?? 0),
+          rejectionReason: String(d.rejectionReason ?? ''),
+          reviewedByUid: d.reviewedByUid ? String(d.reviewedByUid) : undefined,
+          reviewedAtIso: timestampToIso(d.reviewedAt),
           createdByUid: String(d.createdByUid ?? ''),
+          updatedAtIso: timestampToIso(d.updatedAt),
         };
       });
+      records.sort((a, b) => (b.applicationDateIso || '').localeCompare(a.applicationDateIso || ''));
       handlers.onDealers(records);
     },
     (error) => {
@@ -165,19 +221,59 @@ export function subscribeAdminWorkspace(handlers: LiveAdminSubscriptionHandlers)
     (snapshot) => {
       const records: ServiceRequest[] = snapshot.docs.map((docSnap) => {
         const d = docSnap.data();
+        const rawType = String(d.serviceType ?? 'RO Installation');
+        const serviceType: ServiceRequestType = VALID_SERVICE_TYPES.includes(
+          rawType as ServiceRequestType
+        )
+          ? (rawType as ServiceRequestType)
+          : 'RO Installation';
+
+        const rawCategory = String(d.requestCategory ?? '');
+        const requestCategory: ServiceRequestCategory =
+          rawCategory === 'Installation' ||
+          rawCategory === 'Maintenance' ||
+          rawCategory === 'Repair'
+            ? rawCategory
+            : inferServiceCategory(serviceType);
+
+        const rawStatus = String(d.status ?? 'open');
+        const status: ServiceTicketStatus = VALID_SERVICE_STATUSES.includes(
+          rawStatus as ServiceTicketStatus
+        )
+          ? (rawStatus as ServiceTicketStatus)
+          : 'open';
+
+        const createdIso = timestampToIso(d.createdAt) ?? String(d.scheduledDateIso ?? '');
+        const customerUid = String(d.customerUid ?? '');
+
         return {
           id: docSnap.id,
           ticketNumber: String(d.ticketNumber ?? ''),
           orderId: String(d.orderId ?? ''),
           orderNumber: String(d.orderNumber ?? ''),
-          customerUid: String(d.customerUid ?? ''),
-          serviceType: (d.serviceType as ServiceRequest['serviceType']) ?? 'RO Installation',
-          status: (d.status as ServiceRequest['status']) ?? 'open',
+          customerUid,
+          customerCode: String(d.customerCode ?? customerUid.toUpperCase().replace(/_/g, '-')),
+          customerDisplayName: String(d.customerDisplayName ?? customerUid),
+          requestCategory,
+          serviceType,
+          status,
           regionCity: String(d.regionCity ?? ''),
+          submissionDateIso: String(d.submissionDateIso ?? createdIso),
           scheduledDateIso: String(d.scheduledDateIso ?? ''),
+          preferredTimeSlot: d.preferredTimeSlot ? String(d.preferredTimeSlot) : undefined,
+          productId: d.productId ? String(d.productId) : undefined,
+          productModel: String(d.productModel ?? 'Califnco Water Purification System'),
+          requestDetails: String(
+            d.requestDetails ??
+              `${serviceType} requested for order ${String(d.orderNumber ?? '')} in ${String(d.regionCity ?? '')}.`
+          ),
+          resolutionNotes: String(d.resolutionNotes ?? ''),
+          updatedByUid: d.updatedByUid ? String(d.updatedByUid) : undefined,
           createdByUid: String(d.createdByUid ?? ''),
+          updatedAtIso: timestampToIso(d.updatedAt),
         };
       });
+      records.sort((a, b) => (b.submissionDateIso || '').localeCompare(a.submissionDateIso || ''));
       handlers.onServiceRequests(records);
     },
     (error) => {
@@ -266,7 +362,6 @@ export async function transitionOrderFulfilment(
     updatedAt: serverTimestamp(),
   };
 
-  // Pre-dispatch cancellation of a settled order atomically marks paymentStatus as refunded
   if (nextStatus === 'cancelled' && order.paymentStatus === 'paid') {
     payload.paymentStatus = 'refunded';
   }
@@ -313,6 +408,195 @@ export async function updateOrderDispatchNotes(
   }
 }
 
+// ============================================================================
+// PAGE 21: DEALER APPROVAL — FIRESTORE SERVICES
+// ============================================================================
+
+export async function fetchDealerApplicationDetails(
+  dealerDocId: string
+): Promise<DealerApplicationReviewDetails | null> {
+  assertValidDocId(dealerDocId, 'dealer');
+  const reviewPath = `dealers/${dealerDocId}/application_details/review`;
+
+  try {
+    const snap = await getDoc(doc(db, 'dealers', dealerDocId, 'application_details', 'review'));
+    if (!snap.exists()) {
+      return null;
+    }
+    const d = snap.data();
+    return {
+      dealerDocId: String(d.dealerDocId ?? dealerDocId),
+      applicantEmail: String(d.applicantEmail ?? ''),
+      applicantPhone: String(d.applicantPhone ?? ''),
+      registeredWarehouse: String(d.registeredWarehouse ?? ''),
+      annualProjectedVolumeInr: Number(d.annualProjectedVolumeInr ?? 0),
+      applicantNotes: String(d.applicantNotes ?? ''),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, reviewPath);
+  }
+}
+
+export async function approveDealerApplication(params: {
+  dealer: DealerSummary;
+  adminUid: string;
+  wholesaleTier: string;
+  creditLimit: number;
+}): Promise<void> {
+  const { dealer, adminUid, wholesaleTier, creditLimit } = params;
+  assertValidDocId(dealer.id, 'dealer');
+  assertValidDocId(adminUid, 'adminUid');
+
+  if (dealer.approvalStatus !== 'pending') {
+    throw new Error('Only pending dealer applications can be approved.');
+  }
+  if (dealer.ownerUid === adminUid) {
+    throw new Error('Self-approval is prohibited by security policy.');
+  }
+
+  const sanitizedTier = wholesaleTier.trim().slice(0, 80);
+  if (sanitizedTier.length < 2) {
+    throw new Error('Select a valid wholesale partner tier.');
+  }
+
+  const boundedCredit = Math.trunc(creditLimit);
+  if (
+    boundedCredit < VALIDATION_CONSTRAINTS.DEALER_CREDIT_MIN_APPROVED ||
+    boundedCredit > VALIDATION_CONSTRAINTS.DEALER_CREDIT_MAX_APPROVED
+  ) {
+    throw new Error('Credit limit must be between ₹50,000 and ₹1,00,00,000.');
+  }
+
+  const dealerPath = `dealers/${dealer.id}`;
+  try {
+    await updateDoc(doc(db, 'dealers', dealer.id), {
+      approvalStatus: 'approved',
+      wholesaleTier: sanitizedTier,
+      creditLimit: boundedCredit,
+      availableCredit: boundedCredit,
+      rejectionReason: '',
+      reviewedByUid: adminUid,
+      reviewedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, dealerPath);
+  }
+}
+
+export async function rejectDealerApplication(params: {
+  dealer: DealerSummary;
+  adminUid: string;
+  rejectionReason: string;
+}): Promise<void> {
+  const { dealer, adminUid, rejectionReason } = params;
+  assertValidDocId(dealer.id, 'dealer');
+  assertValidDocId(adminUid, 'adminUid');
+
+  if (dealer.approvalStatus !== 'pending') {
+    throw new Error('Only pending dealer applications can be rejected.');
+  }
+
+  const sanitizedReason = rejectionReason
+    .trim()
+    .slice(0, VALIDATION_CONSTRAINTS.REJECTION_REASON_MAX_LENGTH);
+
+  if (sanitizedReason.length < VALIDATION_CONSTRAINTS.REJECTION_REASON_MIN_LENGTH) {
+    throw new Error(
+      `Provide a clear rejection reason of at least ${VALIDATION_CONSTRAINTS.REJECTION_REASON_MIN_LENGTH} characters.`
+    );
+  }
+
+  const dealerPath = `dealers/${dealer.id}`;
+  try {
+    await updateDoc(doc(db, 'dealers', dealer.id), {
+      approvalStatus: 'rejected',
+      wholesaleTier: 'Application Declined',
+      creditLimit: 0,
+      availableCredit: 0,
+      rejectionReason: sanitizedReason,
+      reviewedByUid: adminUid,
+      reviewedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, dealerPath);
+  }
+}
+
+// ============================================================================
+// PAGE 22: SERVICE DESK — FIRESTORE SERVICES
+// ============================================================================
+
+export async function fetchServicePrivateContact(
+  requestId: string
+): Promise<ServiceRequestPrivateContact | null> {
+  assertValidDocId(requestId, 'serviceRequest');
+  const contactPath = `service_requests/${requestId}/private_details/contact`;
+
+  try {
+    const snap = await getDoc(
+      doc(db, 'service_requests', requestId, 'private_details', 'contact')
+    );
+    if (!snap.exists()) {
+      return null;
+    }
+    const d = snap.data();
+    return {
+      requestId: String(d.requestId ?? requestId),
+      contactName: String(d.contactName ?? ''),
+      phone: String(d.phone ?? ''),
+      serviceAddress: String(d.serviceAddress ?? ''),
+      waterSourceTdsPpm: Number(d.waterSourceTdsPpm ?? 0),
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, contactPath);
+  }
+}
+
+export async function updateServiceRequestTicket(params: {
+  ticket: ServiceRequest;
+  adminUid: string;
+  nextStatus: ServiceTicketStatus;
+  scheduledDateIso: string;
+  resolutionNotes: string;
+}): Promise<void> {
+  const { ticket, adminUid, nextStatus, scheduledDateIso, resolutionNotes } = params;
+  assertValidDocId(ticket.id, 'serviceRequest');
+  assertValidDocId(adminUid, 'adminUid');
+
+  const sanitizedNotes = resolutionNotes
+    .trim()
+    .slice(0, VALIDATION_CONSTRAINTS.RESOLUTION_NOTES_MAX_LENGTH);
+
+  const check = validateServiceStatusTransition(ticket.status, nextStatus, sanitizedNotes);
+  if (!check.valid) {
+    throw new Error(check.reason || 'Invalid service request update.');
+  }
+
+  const sanitizedSchedule = scheduledDateIso.trim().slice(0, 40) || ticket.scheduledDateIso;
+  if (sanitizedSchedule.length < 10) {
+    throw new Error('Provide a valid scheduled service date.');
+  }
+
+  const ticketPath = `service_requests/${ticket.id}`;
+  try {
+    await updateDoc(doc(db, 'service_requests', ticket.id), {
+      status: nextStatus,
+      scheduledDateIso: sanitizedSchedule,
+      resolutionNotes: sanitizedNotes,
+      updatedByUid: adminUid,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, ticketPath);
+  }
+}
+
+// ============================================================================
+// ATOMIC FIRESTORE SEEDING & INCREMENTAL SAMPLE SYNC
+// ============================================================================
+
 /**
  * Atomically seeds initial operational records into an empty live Cloud Firestore database
  * when explicitly triggered by an authenticated administrator.
@@ -324,10 +608,6 @@ export async function seedInitialFirestoreData(adminUid: string): Promise<void> 
 
   for (const order of DEMO_ORDERS) {
     assertValidDocId(order.id, 'order');
-    if (!VALIDATION_CONSTRAINTS.ORDER_NUMBER_PATTERN.test(order.orderNumber)) {
-      throw new Error(`Invalid order number format: ${order.orderNumber}`);
-    }
-
     const orderRef = doc(db, 'orders', order.id);
     batch.set(orderRef, {
       orderNumber: order.orderNumber.slice(0, VALIDATION_CONSTRAINTS.ORDER_NUMBER_MAX_LENGTH),
@@ -394,15 +674,41 @@ export async function seedInitialFirestoreData(adminUid: string): Promise<void> 
     const dealerRef = doc(db, 'dealers', dealer.id);
     batch.set(dealerRef, {
       dealerCode: dealer.dealerCode,
+      dealerId: dealer.dealerId,
       ownerUid: dealer.ownerUid,
       businessName: dealer.businessName.slice(0, 140),
+      contactPerson: dealer.contactPerson.slice(0, 100),
+      gstin: dealer.gstin.slice(0, VALIDATION_CONSTRAINTS.GSTIN_MAX_LENGTH),
+      businessType: dealer.businessType,
       regionCity: dealer.regionCity.slice(0, 80),
+      applicationDateIso: dealer.applicationDateIso,
       approvalStatus: dealer.approvalStatus,
       wholesaleTier: dealer.wholesaleTier.slice(0, 80),
+      creditLimit: dealer.creditLimit,
+      availableCredit: dealer.availableCredit,
+      rejectionReason: dealer.rejectionReason.slice(
+        0,
+        VALIDATION_CONSTRAINTS.REJECTION_REASON_MAX_LENGTH
+      ),
       createdByUid: adminUid,
       createdAt: now,
       updatedAt: now,
     });
+
+    const review = SEED_DEALER_REVIEW_DETAILS[dealer.id];
+    if (review) {
+      const reviewRef = doc(db, 'dealers', dealer.id, 'application_details', 'review');
+      batch.set(reviewRef, {
+        dealerDocId: dealer.id,
+        applicantEmail: review.applicantEmail.slice(0, 160),
+        applicantPhone: review.applicantPhone.slice(0, 24),
+        registeredWarehouse: review.registeredWarehouse.slice(0, 320),
+        annualProjectedVolumeInr: review.annualProjectedVolumeInr,
+        applicantNotes: review.applicantNotes.slice(0, 500),
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
   }
 
   for (const srv of DEMO_SERVICE_REQUESTS) {
@@ -413,19 +719,164 @@ export async function seedInitialFirestoreData(adminUid: string): Promise<void> 
       orderId: srv.orderId,
       orderNumber: srv.orderNumber,
       customerUid: srv.customerUid,
+      customerCode: srv.customerCode.slice(0, 40),
+      customerDisplayName: srv.customerDisplayName.slice(0, 120),
+      requestCategory: srv.requestCategory,
       serviceType: srv.serviceType,
       status: srv.status,
       regionCity: srv.regionCity.slice(0, 80),
+      submissionDateIso: srv.submissionDateIso,
       scheduledDateIso: srv.scheduledDateIso,
+      productModel: srv.productModel.slice(0, 160),
+      requestDetails: srv.requestDetails.slice(
+        0,
+        VALIDATION_CONSTRAINTS.REQUEST_DETAILS_MAX_LENGTH
+      ),
+      resolutionNotes: srv.resolutionNotes.slice(
+        0,
+        VALIDATION_CONSTRAINTS.RESOLUTION_NOTES_MAX_LENGTH
+      ),
       createdByUid: adminUid,
       createdAt: now,
       updatedAt: now,
     });
+
+    const contact = SEED_SERVICE_PRIVATE_CONTACTS[srv.id];
+    if (contact) {
+      const contactRef = doc(db, 'service_requests', srv.id, 'private_details', 'contact');
+      batch.set(contactRef, {
+        requestId: srv.id,
+        contactName: contact.contactName.slice(0, 120),
+        phone: contact.phone.slice(0, 24),
+        serviceAddress: contact.serviceAddress.slice(0, 320),
+        waterSourceTdsPpm: contact.waterSourceTdsPpm,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
   }
 
   try {
     await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'orders');
+  }
+}
+
+/**
+ * Adds any missing sample Dealer Applications and Service Desk Tickets (plus isolated review/contact subdocs)
+ * without overwriting already-existing documents in live Cloud Firestore.
+ */
+export async function syncMissingDealerAndServiceSamples(params: {
+  adminUid: string;
+  existingOrderIds: Set<string>;
+  existingDealerIds: Set<string>;
+  existingServiceIds: Set<string>;
+}): Promise<number> {
+  const { adminUid, existingOrderIds, existingDealerIds, existingServiceIds } = params;
+  assertValidDocId(adminUid, 'adminUid');
+
+  const batch = writeBatch(db);
+  const now = serverTimestamp();
+  let addedCount = 0;
+
+  for (const dealer of DEMO_DEALERS) {
+    if (existingDealerIds.has(dealer.id)) continue;
+    assertValidDocId(dealer.id, 'dealer');
+    batch.set(doc(db, 'dealers', dealer.id), {
+      dealerCode: dealer.dealerCode,
+      dealerId: dealer.dealerId,
+      ownerUid: dealer.ownerUid,
+      businessName: dealer.businessName.slice(0, 140),
+      contactPerson: dealer.contactPerson.slice(0, 100),
+      gstin: dealer.gstin.slice(0, VALIDATION_CONSTRAINTS.GSTIN_MAX_LENGTH),
+      businessType: dealer.businessType,
+      regionCity: dealer.regionCity.slice(0, 80),
+      applicationDateIso: dealer.applicationDateIso,
+      approvalStatus: dealer.approvalStatus,
+      wholesaleTier: dealer.wholesaleTier.slice(0, 80),
+      creditLimit: dealer.creditLimit,
+      availableCredit: dealer.availableCredit,
+      rejectionReason: dealer.rejectionReason.slice(
+        0,
+        VALIDATION_CONSTRAINTS.REJECTION_REASON_MAX_LENGTH
+      ),
+      createdByUid: adminUid,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const review = SEED_DEALER_REVIEW_DETAILS[dealer.id];
+    if (review) {
+      batch.set(doc(db, 'dealers', dealer.id, 'application_details', 'review'), {
+        dealerDocId: dealer.id,
+        applicantEmail: review.applicantEmail.slice(0, 160),
+        applicantPhone: review.applicantPhone.slice(0, 24),
+        registeredWarehouse: review.registeredWarehouse.slice(0, 320),
+        annualProjectedVolumeInr: review.annualProjectedVolumeInr,
+        applicantNotes: review.applicantNotes.slice(0, 500),
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    addedCount += 1;
+  }
+
+  for (const srv of DEMO_SERVICE_REQUESTS) {
+    if (existingServiceIds.has(srv.id)) continue;
+    if (!existingOrderIds.has(srv.orderId)) continue;
+    assertValidDocId(srv.id, 'serviceRequest');
+
+    batch.set(doc(db, 'service_requests', srv.id), {
+      ticketNumber: srv.ticketNumber,
+      orderId: srv.orderId,
+      orderNumber: srv.orderNumber,
+      customerUid: srv.customerUid,
+      customerCode: srv.customerCode.slice(0, 40),
+      customerDisplayName: srv.customerDisplayName.slice(0, 120),
+      requestCategory: srv.requestCategory,
+      serviceType: srv.serviceType,
+      status: srv.status,
+      regionCity: srv.regionCity.slice(0, 80),
+      submissionDateIso: srv.submissionDateIso,
+      scheduledDateIso: srv.scheduledDateIso,
+      productModel: srv.productModel.slice(0, 160),
+      requestDetails: srv.requestDetails.slice(
+        0,
+        VALIDATION_CONSTRAINTS.REQUEST_DETAILS_MAX_LENGTH
+      ),
+      resolutionNotes: srv.resolutionNotes.slice(
+        0,
+        VALIDATION_CONSTRAINTS.RESOLUTION_NOTES_MAX_LENGTH
+      ),
+      createdByUid: adminUid,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const contact = SEED_SERVICE_PRIVATE_CONTACTS[srv.id];
+    if (contact) {
+      batch.set(doc(db, 'service_requests', srv.id, 'private_details', 'contact'), {
+        requestId: srv.id,
+        contactName: contact.contactName.slice(0, 120),
+        phone: contact.phone.slice(0, 24),
+        serviceAddress: contact.serviceAddress.slice(0, 320),
+        waterSourceTdsPpm: contact.waterSourceTdsPpm,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    addedCount += 1;
+  }
+
+  if (addedCount === 0) {
+    return 0;
+  }
+
+  try {
+    await batch.commit();
+    return addedCount;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'dealers');
   }
 }
