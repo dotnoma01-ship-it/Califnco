@@ -1,0 +1,418 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Hardened Primitives
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Bootstrapped runtime admin check (0 DB reads — safe inside list rules)
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'carternoah060@gmail.com';
+    }
+
+    // Trusted RBAC lookup for single-document reads and mutations
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // =========================================================================
+    // Entity Validation Blueprints (Synchronized with firebase-blueprint.json)
+    // =========================================================================
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'grantedByUid', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'grantedByUid', 'createdAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.email is string && data.email.size() >= 5 && data.email.size() <= 160 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        data.grantedByUid is string && data.grantedByUid.size() >= 1 && data.grantedByUid.size() <= 128 && data.grantedByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidOrderSummary(data) {
+      return data.keys().hasAll([
+          'orderNumber', 'channel', 'customerUid', 'partyId', 'partyDisplayName',
+          'regionCity', 'orderDateIso', 'itemCount', 'subtotalAmount', 'deliveryAmount',
+          'totalAmount', 'paymentStatus', 'fulfilmentStatus', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'orderNumber', 'channel', 'customerUid', 'partyId', 'partyDisplayName',
+          'regionCity', 'orderDateIso', 'itemCount', 'subtotalAmount', 'deliveryAmount',
+          'totalAmount', 'paymentStatus', 'fulfilmentStatus', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.orderNumber is string && data.orderNumber.size() >= 5 && data.orderNumber.size() <= 40 && data.orderNumber.matches('^[A-Z0-9\\-]+$') &&
+        data.channel is string && data.channel.size() <= 16 && data.channel in ['customer', 'dealer'] &&
+        data.customerUid is string && data.customerUid.size() >= 1 && data.customerUid.size() <= 128 && data.customerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.partyId is string && data.partyId.size() >= 3 && data.partyId.size() <= 40 && data.partyId.matches('^[A-Z0-9\\-]+$') &&
+        data.partyDisplayName is string && data.partyDisplayName.size() >= 2 && data.partyDisplayName.size() <= 120 &&
+        data.regionCity is string && data.regionCity.size() >= 2 && data.regionCity.size() <= 80 &&
+        data.orderDateIso is string && data.orderDateIso.size() >= 10 && data.orderDateIso.size() <= 40 &&
+        data.itemCount is int && data.itemCount >= 1 && data.itemCount <= 10000 &&
+        data.subtotalAmount is number && data.subtotalAmount >= 0 && data.subtotalAmount <= 100000000 &&
+        data.deliveryAmount is number && data.deliveryAmount >= 0 && data.deliveryAmount <= 1000000 &&
+        data.totalAmount is number && data.totalAmount >= 1 && data.totalAmount <= 100000000 &&
+        data.paymentStatus is string && data.paymentStatus.size() <= 24 && data.paymentStatus in ['paid', 'credit_net30', 'cod_pending', 'refunded'] &&
+        data.fulfilmentStatus is string && data.fulfilmentStatus.size() <= 24 && data.fulfilmentStatus in ['pending', 'confirmed', 'processing', 'dispatched', 'delivered', 'cancelled'] &&
+        data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128 && data.createdByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOrderLineItem(data) {
+      return data.keys().hasAll([
+          'orderId', 'customerUid', 'sku', 'productName', 'category',
+          'quantity', 'unitPrice', 'lineTotal', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'orderId', 'customerUid', 'sku', 'productName', 'category',
+          'quantity', 'unitPrice', 'lineTotal', 'createdAt'
+        ]) &&
+        data.orderId is string && data.orderId.size() >= 1 && data.orderId.size() <= 128 && data.orderId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.customerUid is string && data.customerUid.size() >= 1 && data.customerUid.size() <= 128 && data.customerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.sku is string && data.sku.size() >= 2 && data.sku.size() <= 40 && data.sku.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.productName is string && data.productName.size() >= 2 && data.productName.size() <= 160 &&
+        data.category is string && data.category.size() <= 32 && data.category in ['Water Purifiers', 'Dispensers', 'Pumps', 'Filters', 'Spare Parts'] &&
+        data.quantity is int && data.quantity >= 1 && data.quantity <= 5000 &&
+        data.unitPrice is number && data.unitPrice >= 1 && data.unitPrice <= 10000000 &&
+        data.lineTotal is number && data.lineTotal >= 1 && data.lineTotal <= 100000000 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidOrderPrivateDetails(data) {
+      return data.keys().hasAll([
+          'orderId', 'recipientName', 'email', 'phone', 'shippingAddress',
+          'postalCode', 'gstin', 'dispatchNotes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'orderId', 'recipientName', 'email', 'phone', 'shippingAddress',
+          'postalCode', 'gstin', 'dispatchNotes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.orderId is string && data.orderId.size() >= 1 && data.orderId.size() <= 128 && data.orderId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.recipientName is string && data.recipientName.size() >= 2 && data.recipientName.size() <= 120 &&
+        data.email is string && data.email.size() >= 5 && data.email.size() <= 160 &&
+        data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 24 &&
+        data.shippingAddress is string && data.shippingAddress.size() >= 5 && data.shippingAddress.size() <= 320 &&
+        data.postalCode is string && data.postalCode.size() >= 4 && data.postalCode.size() <= 16 && data.postalCode.matches('^[0-9A-Za-z\\- ]+$') &&
+        data.gstin is string && data.gstin.size() <= 20 &&
+        data.dispatchNotes is string && data.dispatchNotes.size() <= 400 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDealerSummary(data) {
+      return data.keys().hasAll([
+          'dealerCode', 'ownerUid', 'businessName', 'regionCity',
+          'approvalStatus', 'wholesaleTier', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'dealerCode', 'ownerUid', 'businessName', 'regionCity',
+          'approvalStatus', 'wholesaleTier', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.dealerCode is string && data.dealerCode.size() >= 4 && data.dealerCode.size() <= 32 && data.dealerCode.matches('^[A-Z0-9\\-]+$') &&
+        data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.businessName is string && data.businessName.size() >= 2 && data.businessName.size() <= 140 &&
+        data.regionCity is string && data.regionCity.size() >= 2 && data.regionCity.size() <= 80 &&
+        data.approvalStatus is string && data.approvalStatus.size() <= 16 && data.approvalStatus in ['approved', 'pending', 'rejected'] &&
+        data.wholesaleTier is string && data.wholesaleTier.size() >= 2 && data.wholesaleTier.size() <= 80 &&
+        data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128 && data.createdByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidServiceRequest(data) {
+      return data.keys().hasAll([
+          'ticketNumber', 'orderId', 'orderNumber', 'customerUid', 'serviceType',
+          'status', 'regionCity', 'scheduledDateIso', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ticketNumber', 'orderId', 'orderNumber', 'customerUid', 'serviceType',
+          'status', 'regionCity', 'scheduledDateIso', 'createdByUid', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ticketNumber is string && data.ticketNumber.size() >= 5 && data.ticketNumber.size() <= 40 && data.ticketNumber.matches('^[A-Z0-9\\-]+$') &&
+        data.orderId is string && data.orderId.size() >= 1 && data.orderId.size() <= 128 && data.orderId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.orderNumber is string && data.orderNumber.size() >= 5 && data.orderNumber.size() <= 40 && data.orderNumber.matches('^[A-Z0-9\\-]+$') &&
+        data.customerUid is string && data.customerUid.size() >= 1 && data.customerUid.size() <= 128 && data.customerUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.serviceType is string && data.serviceType.size() <= 48 && data.serviceType in ['RO Installation', '6-Month Filter Check', 'Booster Pump Calibration', 'Warranty Repair'] &&
+        data.status is string && data.status.size() <= 20 && data.status in ['open', 'scheduled', 'completed', 'cancelled'] &&
+        data.regionCity is string && data.regionCity.size() >= 2 && data.regionCity.size() <= 80 &&
+        data.scheduledDateIso is string && data.scheduledDateIso.size() >= 10 && data.scheduledDateIso.size() <= 40 &&
+        data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128 && data.createdByUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Order State Machine Helpers
+    // =========================================================================
+    function isOrderNotTerminal() {
+      return !(existing().fulfilmentStatus in ['delivered', 'cancelled']);
+    }
+
+    function isOrderImmutableCoreUnchanged() {
+      return incoming().orderNumber == existing().orderNumber &&
+        incoming().channel == existing().channel &&
+        incoming().customerUid == existing().customerUid &&
+        incoming().partyId == existing().partyId &&
+        incoming().partyDisplayName == existing().partyDisplayName &&
+        incoming().regionCity == existing().regionCity &&
+        incoming().orderDateIso == existing().orderDateIso &&
+        incoming().itemCount == existing().itemCount &&
+        incoming().subtotalAmount == existing().subtotalAmount &&
+        incoming().deliveryAmount == existing().deliveryAmount &&
+        incoming().totalAmount == existing().totalAmount &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+    }
+
+    function isAdvanceFulfilmentStep() {
+      return incoming().diff(existing()).affectedKeys().hasOnly(['fulfilmentStatus', 'updatedAt']) &&
+        (
+          (existing().fulfilmentStatus == 'pending' && incoming().fulfilmentStatus == 'confirmed') ||
+          (existing().fulfilmentStatus == 'confirmed' && incoming().fulfilmentStatus == 'processing') ||
+          (existing().fulfilmentStatus == 'processing' && incoming().fulfilmentStatus == 'dispatched') ||
+          (existing().fulfilmentStatus == 'dispatched' && incoming().fulfilmentStatus == 'delivered')
+        );
+    }
+
+    function isCancelPreDispatchOrder() {
+      return existing().fulfilmentStatus in ['pending', 'confirmed', 'processing'] &&
+        incoming().fulfilmentStatus == 'cancelled' &&
+        (
+          (
+            existing().paymentStatus == 'paid' &&
+            incoming().paymentStatus == 'refunded' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['fulfilmentStatus', 'paymentStatus', 'updatedAt'])
+          ) ||
+          (
+            existing().paymentStatus in ['cod_pending', 'credit_net30'] &&
+            incoming().paymentStatus == existing().paymentStatus &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['fulfilmentStatus', 'updatedAt'])
+          )
+        );
+    }
+
+    function isSettleOrderPayment() {
+      return incoming().diff(existing()).affectedKeys().hasOnly(['paymentStatus', 'updatedAt']) &&
+        existing().paymentStatus in ['cod_pending', 'credit_net30'] &&
+        incoming().paymentStatus == 'paid';
+    }
+
+    // =========================================================================
+    // Collection 1: /admins/{adminId}
+    // =========================================================================
+    match /admins/{adminId} {
+      allow get: if isVerifiedUser() && isValidId(adminId) && (request.auth.uid == adminId || isAdmin());
+      allow list: if false;
+      allow create: if isVerifiedUser() &&
+        isValidId(adminId) &&
+        isValidAdminRecord(incoming()) &&
+        incoming().uid == adminId &&
+        incoming().grantedByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+      allow update: if false;
+      allow delete: if isVerifiedUser() && isValidId(adminId) && adminId != request.auth.uid && isAdmin();
+    }
+
+    // =========================================================================
+    // Collection 2: /orders/{orderId}
+    // =========================================================================
+    match /orders/{orderId} {
+      allow get: if isVerifiedUser() && isValidId(orderId) && (existing().customerUid == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerifiedUser() && resource.data.customerUid == request.auth.uid);
+
+      allow create: if isVerifiedUser() &&
+        isValidId(orderId) &&
+        isValidOrderSummary(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (incoming().customerUid == request.auth.uid || isAdmin()) &&
+        existsAfter(/databases/$(database)/documents/orders/$(orderId)/private_details/shipping);
+
+      allow update: if isVerifiedUser() &&
+        isValidId(orderId) &&
+        isValidOrderSummary(incoming()) &&
+        isOrderNotTerminal() &&
+        isOrderImmutableCoreUnchanged() &&
+        isAdmin() &&
+        (
+          isAdvanceFulfilmentStep() ||
+          isCancelPreDispatchOrder() ||
+          isSettleOrderPayment()
+        );
+
+      allow delete: if false;
+
+      // -----------------------------------------------------------------------
+      // Subcollection 2A: /orders/{orderId}/items/{itemId}
+      // -----------------------------------------------------------------------
+      match /items/{itemId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(orderId) &&
+          isValidId(itemId) &&
+          (
+            isAdmin() ||
+            get(/databases/$(database)/documents/orders/$(orderId)).data.customerUid == request.auth.uid
+          );
+
+        allow list: if isBootstrappedAdmin() || (isVerifiedUser() && resource.data.customerUid == request.auth.uid);
+
+        allow create: if isVerifiedUser() &&
+          isValidId(orderId) &&
+          isValidId(itemId) &&
+          isValidOrderLineItem(incoming()) &&
+          incoming().orderId == orderId &&
+          incoming().createdAt == request.time &&
+          existsAfter(/databases/$(database)/documents/orders/$(orderId)) &&
+          getAfter(/databases/$(database)/documents/orders/$(orderId)).data.customerUid == incoming().customerUid &&
+          (incoming().customerUid == request.auth.uid || isAdmin());
+
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // -----------------------------------------------------------------------
+      // Subcollection 2B: /orders/{orderId}/private_details/{detailId}
+      // Strictly Isolated Customer/Dealer Shipping PII
+      // -----------------------------------------------------------------------
+      match /private_details/{detailId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(orderId) &&
+          detailId == 'shipping' &&
+          (
+            isAdmin() ||
+            get(/databases/$(database)/documents/orders/$(orderId)).data.customerUid == request.auth.uid
+          );
+
+        allow list: if false;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(orderId) &&
+          detailId == 'shipping' &&
+          isValidOrderPrivateDetails(incoming()) &&
+          incoming().orderId == orderId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/orders/$(orderId)) &&
+          (
+            isAdmin() ||
+            getAfter(/databases/$(database)/documents/orders/$(orderId)).data.customerUid == request.auth.uid
+          );
+
+        allow update: if isVerifiedUser() &&
+          isValidId(orderId) &&
+          detailId == 'shipping' &&
+          isValidOrderPrivateDetails(incoming()) &&
+          incoming().orderId == existing().orderId &&
+          incoming().recipientName == existing().recipientName &&
+          incoming().email == existing().email &&
+          incoming().phone == existing().phone &&
+          incoming().shippingAddress == existing().shippingAddress &&
+          incoming().postalCode == existing().postalCode &&
+          incoming().gstin == existing().gstin &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['dispatchNotes', 'updatedAt']) &&
+          !(get(/databases/$(database)/documents/orders/$(orderId)).data.fulfilmentStatus in ['delivered', 'cancelled']) &&
+          isAdmin();
+
+        allow delete: if false;
+      }
+    }
+
+    // =========================================================================
+    // Collection 3: /dealers/{dealerId}
+    // =========================================================================
+    match /dealers/{dealerId} {
+      allow get: if isVerifiedUser() && isValidId(dealerId) && (existing().ownerUid == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+
+      allow create: if isVerifiedUser() &&
+        isValidId(dealerId) &&
+        isValidDealerSummary(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (incoming().ownerUid == request.auth.uid || isAdmin());
+
+      allow update: if isVerifiedUser() &&
+        isValidId(dealerId) &&
+        isValidDealerSummary(incoming()) &&
+        incoming().dealerCode == existing().dealerCode &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().businessName == existing().businessName &&
+        incoming().regionCity == existing().regionCity &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['approvalStatus', 'wholesaleTier', 'updatedAt']) &&
+        isAdmin();
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // Collection 4: /service_requests/{requestId}
+    // =========================================================================
+    match /service_requests/{requestId} {
+      allow get: if isVerifiedUser() && isValidId(requestId) && (existing().customerUid == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerifiedUser() && resource.data.customerUid == request.auth.uid);
+
+      allow create: if isVerifiedUser() &&
+        isValidId(requestId) &&
+        isValidServiceRequest(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        existsAfter(/databases/$(database)/documents/orders/$(incoming().orderId)) &&
+        (incoming().customerUid == request.auth.uid || isAdmin());
+
+      allow update: if isVerifiedUser() &&
+        isValidId(requestId) &&
+        isValidServiceRequest(incoming()) &&
+        !(existing().status in ['completed', 'cancelled']) &&
+        incoming().ticketNumber == existing().ticketNumber &&
+        incoming().orderId == existing().orderId &&
+        incoming().orderNumber == existing().orderNumber &&
+        incoming().customerUid == existing().customerUid &&
+        incoming().serviceType == existing().serviceType &&
+        incoming().regionCity == existing().regionCity &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'scheduledDateIso', 'updatedAt']) &&
+        isAdmin();
+
+      allow delete: if false;
+    }
+  }
+}

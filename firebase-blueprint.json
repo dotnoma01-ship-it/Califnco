@@ -1,0 +1,501 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Authorized administrator registry mapping Firebase Auth UIDs to administrative privileges.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID of the administrator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified administrator email address.",
+          "minLength": 5,
+          "maxLength": 160
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full display name of the administrator.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "grantedByUid": {
+          "type": "string",
+          "description": "UID of the administrator who granted access.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when administrator access was granted."
+        }
+      },
+      "required": ["uid", "email", "displayName", "grantedByUid", "createdAt"]
+    },
+    "OrderSummary": {
+      "title": "OrderSummary",
+      "description": "Operational summary record for retail customer and wholesale dealer orders without sensitive shipping PII.",
+      "type": "object",
+      "properties": {
+        "orderNumber": {
+          "type": "string",
+          "description": "Human-readable order or PO reference code.",
+          "minLength": 5,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "channel": {
+          "type": "string",
+          "description": "Sales channel classification.",
+          "enum": ["customer", "dealer"],
+          "maxLength": 16
+        },
+        "customerUid": {
+          "type": "string",
+          "description": "Firebase UID of the purchasing customer or dealer account.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "partyId": {
+          "type": "string",
+          "description": "Customer or dealer account reference identifier.",
+          "minLength": 3,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "partyDisplayName": {
+          "type": "string",
+          "description": "Display name or registered business name for order listing.",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "regionCity": {
+          "type": "string",
+          "description": "Destination city and state summary.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "orderDateIso": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 timestamp when the order was placed.",
+          "minLength": 10,
+          "maxLength": 40
+        },
+        "itemCount": {
+          "type": "number",
+          "description": "Total unit count across all line items."
+        },
+        "subtotalAmount": {
+          "type": "number",
+          "description": "Order subtotal in INR before freight."
+        },
+        "deliveryAmount": {
+          "type": "number",
+          "description": "Delivery or freight charge in INR."
+        },
+        "totalAmount": {
+          "type": "number",
+          "description": "Total payable order amount in INR."
+        },
+        "paymentStatus": {
+          "type": "string",
+          "description": "Payment settlement state.",
+          "enum": ["paid", "credit_net30", "cod_pending", "refunded"],
+          "maxLength": 24
+        },
+        "fulfilmentStatus": {
+          "type": "string",
+          "description": "Warehouse and logistics fulfilment lifecycle state.",
+          "enum": ["pending", "confirmed", "processing", "dispatched", "delivered", "cancelled"],
+          "maxLength": 24
+        },
+        "createdByUid": {
+          "type": "string",
+          "description": "UID of the actor that created the order record.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest state transition."
+        }
+      },
+      "required": [
+        "orderNumber",
+        "channel",
+        "customerUid",
+        "partyId",
+        "partyDisplayName",
+        "regionCity",
+        "orderDateIso",
+        "itemCount",
+        "subtotalAmount",
+        "deliveryAmount",
+        "totalAmount",
+        "paymentStatus",
+        "fulfilmentStatus",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "OrderLineItem": {
+      "title": "OrderLineItem",
+      "description": "Individual product SKU line item belonging to an order subcollection.",
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "description": "Parent order document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerUid": {
+          "type": "string",
+          "description": "Owner UID mirrored from parent order for O(1) query enforcement.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sku": {
+          "type": "string",
+          "description": "Product SKU identifier.",
+          "minLength": 2,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productName": {
+          "type": "string",
+          "description": "Product title.",
+          "minLength": 2,
+          "maxLength": 160
+        },
+        "category": {
+          "type": "string",
+          "description": "Califnco hardware or consumable category.",
+          "enum": ["Water Purifiers", "Dispensers", "Pumps", "Filters", "Spare Parts"],
+          "maxLength": 32
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Ordered unit count."
+        },
+        "unitPrice": {
+          "type": "number",
+          "description": "Unit price in INR."
+        },
+        "lineTotal": {
+          "type": "number",
+          "description": "Extended line total in INR."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": [
+        "orderId",
+        "customerUid",
+        "sku",
+        "productName",
+        "category",
+        "quantity",
+        "unitPrice",
+        "lineTotal",
+        "createdAt"
+      ]
+    },
+    "OrderPrivateDetails": {
+      "title": "OrderPrivateDetails",
+      "description": "Isolated PII subcollection storing sensitive recipient contact, street address, and tax details.",
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "description": "Parent order document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "recipientName": {
+          "type": "string",
+          "description": "Full name of delivery recipient.",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Recipient email for dispatch notifications.",
+          "minLength": 5,
+          "maxLength": 160
+        },
+        "phone": {
+          "type": "string",
+          "description": "Recipient contact phone number.",
+          "minLength": 7,
+          "maxLength": 24
+        },
+        "shippingAddress": {
+          "type": "string",
+          "description": "Full street and warehouse delivery address.",
+          "minLength": 5,
+          "maxLength": 320
+        },
+        "postalCode": {
+          "type": "string",
+          "description": "Postal or PIN code.",
+          "minLength": 4,
+          "maxLength": 16,
+          "pattern": "^[0-9A-Za-z\\- ]+$"
+        },
+        "gstin": {
+          "type": "string",
+          "description": "Optional dealer GSTIN tax identifier.",
+          "minLength": 0,
+          "maxLength": 20
+        },
+        "dispatchNotes": {
+          "type": "string",
+          "description": "Logistics or installation notes.",
+          "minLength": 0,
+          "maxLength": 400
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "orderId",
+        "recipientName",
+        "email",
+        "phone",
+        "shippingAddress",
+        "postalCode",
+        "gstin",
+        "dispatchNotes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DealerSummary": {
+      "title": "DealerSummary",
+      "description": "Wholesale dealer partner status record used for dashboard approval counts.",
+      "type": "object",
+      "properties": {
+        "dealerCode": {
+          "type": "string",
+          "description": "Unique Califnco dealer partner code.",
+          "minLength": 4,
+          "maxLength": 32,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase UID of the dealer account owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "businessName": {
+          "type": "string",
+          "description": "Registered wholesale entity name.",
+          "minLength": 2,
+          "maxLength": 140
+        },
+        "regionCity": {
+          "type": "string",
+          "description": "Operating city and state.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "approvalStatus": {
+          "type": "string",
+          "description": "Dealer onboarding verification state.",
+          "enum": ["approved", "pending", "rejected"],
+          "maxLength": 16
+        },
+        "wholesaleTier": {
+          "type": "string",
+          "description": "Assigned wholesale margin tier.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "createdByUid": {
+          "type": "string",
+          "description": "UID of the creator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "dealerCode",
+        "ownerUid",
+        "businessName",
+        "regionCity",
+        "approvalStatus",
+        "wholesaleTier",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ServiceRequest": {
+      "title": "ServiceRequest",
+      "description": "Installation and RO maintenance dispatch ticket summary.",
+      "type": "object",
+      "properties": {
+        "ticketNumber": {
+          "type": "string",
+          "description": "Service dispatch reference ID.",
+          "minLength": 5,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "orderId": {
+          "type": "string",
+          "description": "Associated order document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderNumber": {
+          "type": "string",
+          "description": "Associated order reference number.",
+          "minLength": 5,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9\\-]+$"
+        },
+        "customerUid": {
+          "type": "string",
+          "description": "Firebase UID of the customer.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "serviceType": {
+          "type": "string",
+          "description": "Category of technician visit.",
+          "enum": [
+            "RO Installation",
+            "6-Month Filter Check",
+            "Booster Pump Calibration",
+            "Warranty Repair"
+          ],
+          "maxLength": 48
+        },
+        "status": {
+          "type": "string",
+          "description": "Ticket lifecycle state.",
+          "enum": ["open", "scheduled", "completed", "cancelled"],
+          "maxLength": 20
+        },
+        "regionCity": {
+          "type": "string",
+          "description": "Service city and state.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "scheduledDateIso": {
+          "type": "string",
+          "description": "Scheduled service date ISO string.",
+          "minLength": 10,
+          "maxLength": 40
+        },
+        "createdByUid": {
+          "type": "string",
+          "description": "UID of the creator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "ticketNumber",
+        "orderId",
+        "orderNumber",
+        "customerUid",
+        "serviceType",
+        "status",
+        "regionCity",
+        "scheduledDateIso",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": "AdminRecord",
+      "description": "Administrator RBAC registry keyed by Firebase UID."
+    },
+    "/orders/{orderId}": {
+      "schema": "OrderSummary",
+      "description": "Operational summary of retail and wholesale orders."
+    },
+    "/orders/{orderId}/items/{itemId}": {
+      "schema": "OrderLineItem",
+      "description": "Product SKU line items belonging to an order."
+    },
+    "/orders/{orderId}/private_details/{detailId}": {
+      "schema": "OrderPrivateDetails",
+      "description": "Strictly isolated customer/dealer contact and shipping PII."
+    },
+    "/dealers/{dealerId}": {
+      "schema": "DealerSummary",
+      "description": "Dealer onboarding and approval status directory."
+    },
+    "/service_requests/{requestId}": {
+      "schema": "ServiceRequest",
+      "description": "Technician installation and RO maintenance service tickets."
+    }
+  }
+}
